@@ -10,6 +10,7 @@
 #include "include/hash_object.h"
 #include "include/ls_tree.h"
 #include "include/write_tree.h"
+#include "include/commit_tree.h"
 
 
 int main(int argc, char* argv[]) {
@@ -37,6 +38,8 @@ int main(int argc, char* argv[]) {
         return handleLsTree(argc, argv);
     } else if (command == "write-tree"){
         return handleWriteTree(argc, argv);
+    } else if (command == "commit-tree"){
+        return handleCommitTree(argc, argv);
     }
 
         std::cerr << "Unknown command: " << command << "\n";

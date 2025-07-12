@@ -56,3 +56,4 @@ vcpkg_installed
 
 tmp/
 *.py
+*.txt

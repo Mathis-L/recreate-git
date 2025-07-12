@@ -47,6 +47,75 @@ int handleCatFile(int argc, char* argv[]) {
 }
 
 // =================================================================
+// File: src/commands/commit_tree.cpp
+// =================================================================
+
+#include "../include/ls_tree.h"
+#include "../include/object_utils.h"
+#include "../include/constants.h"
+#include "../include/sha1_utils.h"
+#include "../include/time_utils.h"
+
+#include <iostream>
+#include <vector>
+#include <algorithm>
+
+int handleCommitTree(int argc, char* argv[]){
+    bool firstCommit = false;
+    std::string treeSha;
+    std::string commitMessage;
+    std::string previousCommitSha;
+
+    if (argc == 5 && std::string(argv[3]) == "-m") {
+        firstCommit = true;
+        treeSha = argv[2];
+        commitMessage = argv[4];
+    } else if (argc == 7 && std::string(argv[3]) == "-p" && std::string(argv[5]) == "-m") {
+        treeSha = argv[2];
+        previousCommitSha = argv[4];
+        commitMessage = argv[6];
+
+    } else {
+        std::cerr << "Usage: mygit commit-tree <tree_sha> [-p <commit_sha>] -m <message>\n";
+        return EXIT_FAILURE;
+    }
+
+    std::ostringstream commitDataStream;
+    
+    commitDataStream << "tree " << treeSha << "\n";
+
+    if (!firstCommit) {
+        commitDataStream << "parent " << previousCommitSha << "\n";
+    }
+
+    const std::string timestamp = getGitTimestamp();
+    
+    // TODO: Replace with data from config
+    commitDataStream << "author " << constants::AUTHOR_NAME << " <" << constants::AUTHOR_EMAIL << "> " << timestamp << "\n";
+    commitDataStream << "committer " << constants::AUTHOR_NAME << " <" << constants::AUTHOR_EMAIL << "> " << timestamp << "\n";
+    
+    commitDataStream << "\n" << commitMessage << "\n";
+
+    std::string commitContentStr = commitDataStream.str();
+    
+    std::string header = "commit " + std::to_string(commitContentStr.size()) + '\0';
+    std::string fullCommitObjectStr = header + commitContentStr;
+
+    std::span<const std::byte> fullCommitObjectBytes = std::as_bytes(std::span{fullCommitObjectStr});
+
+    auto sha1BytesOpt = writeGitObject(fullCommitObjectBytes);
+    if (sha1BytesOpt) {
+        std::cout << bytesToHex(*sha1BytesOpt) << "\n";
+    } else {
+        // It's good practice to handle the nullopt case
+        std::cerr << "Failed to write commit object.\n";
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+
+// =================================================================
 // File: src/commands/hash_object.cpp
 // =================================================================
 
@@ -260,9 +329,9 @@ std::optional<std::vector<std::byte>> writeTreeFromDirectory(const std::filesyst
 
         if (file.is_directory()) {
             entry.mode = constants::MODE_TREE;
-            auto sha1Opt = writeTreeFromDirectory(file.path());
-            if (!sha1Opt) return std::nullopt; // Propagate failure
-            entry.sha1Bytes = *sha1Opt;
+            auto sha1BytesOpt = writeTreeFromDirectory(file.path());
+            if (!sha1BytesOpt) return std::nullopt;
+            entry.sha1Bytes = *sha1BytesOpt;
         } else if (file.is_regular_file()) {
             entry.mode = constants::MODE_BLOB;
             auto sha1BytesOpt = createBlobAndGetRawSha(file.path()); 
@@ -274,7 +343,7 @@ std::optional<std::vector<std::byte>> writeTreeFromDirectory(const std::filesyst
         entries.push_back(entry);
     }
 
-    // Construct the tree object content from the entries
+    // Construct the tree object content from the entries "mode filename\0rawSha1Bytes"
     std::vector<std::byte> treeContent;
     for (const auto& entry : entries) {
         std::string entryStr = entry.mode + " " + entry.filename + '\0';
@@ -283,25 +352,22 @@ std::optional<std::vector<std::byte>> writeTreeFromDirectory(const std::filesyst
         treeContent.insert(treeContent.end(), entry.sha1Bytes.begin(), entry.sha1Bytes.end());
     }
 
-    // Construct the full object with header
+    // Construct the full object with header 
     std::string header = "tree " + std::to_string(treeContent.size()) + '\0';
     std::vector<std::byte> fullTreeObject;
     std::transform(header.begin(), header.end(), std::back_inserter(fullTreeObject),
                    [](char c){ return std::byte(c); });
     fullTreeObject.insert(fullTreeObject.end(), treeContent.begin(), treeContent.end());
     
-    auto sha1HexOpt = writeGitObject(fullTreeObject);
-    if (!sha1HexOpt) {
-        return std::nullopt;
-    }
+    auto sha1BytesOpt = writeGitObject(fullTreeObject);
     
-    return hexToBytes(*sha1HexOpt);
+    return sha1BytesOpt;
 }
 
 int handleWriteTree(int argc, char* argv[]) {
     auto sha1BytesOpt = writeTreeFromDirectory(".");
     if (sha1BytesOpt) {
-        std::cout << bytesToHex(*sha1BytesOpt) << "\n";
+        std::cout << bytesToHex(*sha1BytesOpt) << "\n"; // The * dereferences sha1BytesOpt, which means it accesses the value stored within the optional object.
         return EXIT_SUCCESS;
     }
     std::cerr << "Failed to write tree object.\n";
@@ -314,6 +380,14 @@ int handleWriteTree(int argc, char* argv[]) {
 
 #pragma once
 int handleCatFile(int argc, char* argv[]);
+
+// =================================================================
+// File: src/include/commit_tree.h
+// =================================================================
+
+#pragma once
+
+int handleCommitTree(int argc, char* argv[]);
 
 // =================================================================
 // File: src/include/constants.h
@@ -335,6 +409,9 @@ namespace constants {
     
     constexpr std::string_view MODE_BLOB = "100644";
     constexpr std::string_view MODE_TREE = "040000";
+
+    constexpr std::string_view AUTHOR_NAME = "Mathis-L";
+    constexpr std::string_view AUTHOR_EMAIL = "mathislafon@gmail.com";
 
     const std::filesystem::path GIT_DIR = ".git";
     const std::filesystem::path OBJECTS_DIR = GIT_DIR / "objects";
@@ -419,6 +496,16 @@ std::string calculateSha1Hex(std::span<const std::byte> data);
 std::vector<std::byte> hexToBytes(const std::string& hex);
 
 // =================================================================
+// File: src/include/time_utils.h
+// =================================================================
+
+#pragma once 
+
+#include <string>
+
+std::string getGitTimestamp();
+
+// =================================================================
 // File: src/include/tree_parser.h
 // =================================================================
 
@@ -470,6 +557,7 @@ bool compressZlib(std::span<const std::byte> input, std::vector<std::byte>& outp
 #include "include/hash_object.h"
 #include "include/ls_tree.h"
 #include "include/write_tree.h"
+#include "include/commit_tree.h"
 
 
 int main(int argc, char* argv[]) {
@@ -497,6 +585,8 @@ int main(int argc, char* argv[]) {
         return handleLsTree(argc, argv);
     } else if (command == "write-tree"){
         return handleWriteTree(argc, argv);
+    } else if (command == "commit-tree"){
+        return handleCommitTree(argc, argv);
     }
 
         std::cerr << "Unknown command: " << command << "\n";
@@ -637,6 +727,43 @@ std::vector<std::byte> hexToBytes(const std::string& hex) {
         bytes.push_back(static_cast<std::byte>(std::stoul(byteString, nullptr, 16)));
     }
     return bytes;
+}
+
+// =================================================================
+// File: src/utils/time_utils.cpp
+// =================================================================
+
+#include <string>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+#include <cmath>
+#include "../include/time_utils.h"
+
+std::string getGitTimestamp() {
+    // Get now as seconds since epoch
+    std::time_t now = std::time(nullptr);
+
+    std::tm local_tm = *std::localtime(&now);
+    std::tm utc_tm   = *std::gmtime(&now);
+
+    // Compute offset from UTC in seconds
+    int offset_sec = static_cast<int>(std::difftime(std::mktime(&local_tm), std::mktime(&utc_tm)));
+
+    // Extract components
+    char sign = (offset_sec >= 0) ? '+' : '-';
+    int abs_offset = std::abs(offset_sec);
+    int hours = abs_offset / 3600;
+    int minutes = (abs_offset % 3600) / 60;
+
+    // Format result
+    std::ostringstream oss;
+    oss << now << " "
+        << sign
+        << std::setw(2) << std::setfill('0') << hours
+        << std::setw(2) << std::setfill('0') << minutes;
+
+    return oss.str();
 }
 
 // =================================================================

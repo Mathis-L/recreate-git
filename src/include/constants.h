@@ -15,6 +15,9 @@ namespace constants {
     constexpr std::string_view MODE_BLOB = "100644";
     constexpr std::string_view MODE_TREE = "040000";
 
+    constexpr std::string_view AUTHOR_NAME = "Mathis-L";
+    constexpr std::string_view AUTHOR_EMAIL = "mathislafon@gmail.com";
+
     const std::filesystem::path GIT_DIR = ".git";
     const std::filesystem::path OBJECTS_DIR = GIT_DIR / "objects";
 }
