@@ -1,0 +1,737 @@
+// =================================================================
+// File: src/commands/cat_file.cpp
+// =================================================================
+
+#include "../include/cat_file.h"
+#include "../include/object_utils.h"
+
+#include <iostream>
+#include <string>
+#include <vector>
+#include <optional>
+
+int handleCatFile(int argc, char* argv[]) {
+    if (argc != 4 || std::string(argv[2]) != "-p") {
+        std::cerr << "Usage: mygit cat-file -p <blob-sha>\n";
+        return EXIT_FAILURE;
+    }
+
+    const std::string objectId = argv[3];
+    auto decompressedDataOpt = readGitObject(objectId);
+
+    if (!decompressedDataOpt) {
+        std::cerr << "Fatal: Not a valid object name " << objectId << '\n';
+        return EXIT_FAILURE;
+    }
+    
+    const auto& decompressedDataVec = *decompressedDataOpt;
+    std::span<const std::byte> dataSpan(decompressedDataVec);
+    auto nullPosIt = findNullSeparator(dataSpan);
+
+    if (nullPosIt == dataSpan.end()) {
+        std::cerr << "Invalid Git object format (missing null separator)\n";
+        return EXIT_FAILURE;
+    }
+
+    // The content is everything after the null byte.
+    // We write it directly to stdout's buffer to handle binary data correctly.
+    const char* contentStart = reinterpret_cast<const char*>(&*(nullPosIt + 1));
+    
+    // We can get the size by creating a subspan
+    auto contentSpan = dataSpan.subspan(std::distance(dataSpan.begin(), nullPosIt) + 1);
+    const size_t contentSize = contentSpan.size();
+
+    std::cout.write(contentStart, contentSize);
+
+    return EXIT_SUCCESS;
+}
+
+// =================================================================
+// File: src/commands/hash_object.cpp
+// =================================================================
+
+#include "../include/hash_object.h"
+#include "../include/constants.h"
+#include "../include/object_utils.h"
+#include "../include/sha1_utils.h"
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <optional>
+#include <algorithm>
+
+
+// Its job is to prepare a blob and write it, returning its bytes SHA.
+std::optional<std::vector<std::byte>> createBlobAndGetRawSha(const std::filesystem::path& filePath) {
+    std::ifstream inFile(filePath, std::ios::binary);
+    if (!inFile) {
+        return std::nullopt; // Caller will handle the error message
+    }
+
+     // 1. Read the raw characters from the file into a temporary vector of char.
+    const std::vector<char> fileContent(
+        (std::istreambuf_iterator<char>(inFile)),
+        std::istreambuf_iterator<char>()
+    );
+
+    // 2. Prepare the Git object header.
+    std::string header = "blob " + std::to_string(fileContent.size()) + '\0';
+    
+    // 3. Construct the final blob content vector of bytes.
+    std::vector<std::byte> blobContent;
+    blobContent.reserve(header.length() + fileContent.size());
+
+    // Insert header bytes directly
+    blobContent.insert(blobContent.end(), 
+                    reinterpret_cast<const std::byte*>(header.data()), 
+                    reinterpret_cast<const std::byte*>(header.data()) + header.length());
+
+    // Insert file content bytes directly
+    blobContent.insert(blobContent.end(), 
+                    reinterpret_cast<const std::byte*>(fileContent.data()), 
+                    reinterpret_cast<const std::byte*>(fileContent.data()) + fileContent.size());
+
+    // 4. Write the final object and return its SHA.
+    return writeGitObject(blobContent);
+}
+
+int handleHashObject(int argc, char* argv[]) {
+    if (argc != 4 || std::string(argv[2]) != "-w") {
+        std::cerr << "Usage: mygit hash-object -w <file-path>\n";
+        return EXIT_FAILURE;
+    }
+
+    const std::filesystem::path filePath = argv[3];
+    auto sha1BytesOpt = createBlobAndGetRawSha(filePath);
+
+    if (sha1BytesOpt) {
+        std::cout << bytesToHex(*sha1BytesOpt) << "\n"; // Convert to hex only for display
+        return EXIT_SUCCESS;
+    } else {
+        std::cerr << "Error: cannot create blob object from: " << filePath << '\n';
+        return EXIT_FAILURE;
+    }
+}
+
+// =================================================================
+// File: src/commands/init.cpp
+// =================================================================
+
+#include "../include/init.h"
+#include "../include/constants.h"
+
+#include <iostream>
+#include <filesystem>
+#include <fstream>
+
+int handleInit() {
+    try {
+        std::filesystem::create_directory(constants::GIT_DIR);
+        std::filesystem::create_directory(constants::OBJECTS_DIR);
+        std::filesystem::create_directory(constants::GIT_DIR / constants::REFS_DIR_NAME);
+
+        std::ofstream headFile(constants::GIT_DIR / constants::HEAD_FILE_NAME);
+        if (headFile.is_open()) {
+            headFile << "ref: refs/heads/main\n";
+        } else {
+            std::cerr << "Failed to create " << constants::HEAD_FILE_NAME << " file.\n";
+            return EXIT_FAILURE;
+        }
+
+        std::cout << "Initialized empty Git repository in " 
+                  << std::filesystem::absolute(constants::GIT_DIR).string() << "/\n";
+
+    } catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "Error: " << e.what() << '\n';
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+
+// =================================================================
+// File: src/commands/ls_tree.cpp
+// =================================================================
+
+#include "../include/ls_tree.h"
+#include "../include/object_utils.h"
+#include "../include/tree_parser.h"
+#include "../include/sha1_utils.h"
+#include "../include/constants.h"
+
+#include <iostream>
+#include <string>
+#include <vector>
+#include <optional>
+#include <algorithm> 
+#include <span>
+
+
+int handleLsTree(int argc, char* argv[]) {
+    bool nameOnly = false;
+    std::string treeSha;
+
+    if (argc == 4 && std::string(argv[2]) == "--name-only") {
+        nameOnly = true;
+        treeSha = argv[3];
+    } else if (argc == 3) {
+        treeSha = argv[2];
+    } else {
+        std::cerr << "Usage: mygit ls-tree [--name-only] <tree-sha>\n";
+        return EXIT_FAILURE;
+    }
+
+    auto decompressedDataOpt = readGitObject(treeSha);
+    if (!decompressedDataOpt) {
+        std::cerr << "Fatal: Not a valid object name " << treeSha << '\n';
+        return EXIT_FAILURE;
+    }
+
+    // *** FIX #1: Create a span and work consistently with it ***
+    const auto& decompressedDataVec = *decompressedDataOpt;
+    std::span<const std::byte> dataSpan(decompressedDataVec);
+
+    auto nullPosIt = findNullSeparator(dataSpan);
+    if (nullPosIt == dataSpan.end()) { // Compare span::iterator to span::iterator
+        std::cerr << "Invalid tree object: missing header\n";
+        return EXIT_FAILURE;
+    }
+
+    // The tree content is everything *after* the null byte separator.
+    // Use the span's subspan feature for a clean, safe way to get the content view.
+    auto treeContent = dataSpan.subspan(std::distance(dataSpan.begin(), nullPosIt) + 1);
+
+    auto entriesOpt = parseTreeObject(treeContent);
+    if (!entriesOpt) {
+        std::cerr << "Failed to parse tree object\n";
+        return EXIT_FAILURE;
+    }
+
+    for (const auto& entry : *entriesOpt) {
+        if (nameOnly) {
+            std::cout << entry.filename << "\n";
+        } else {
+            // Now the compiler knows what constants::MODE_TREE is
+            const std::string type = (entry.mode == constants::MODE_TREE) ? "tree" : "blob";
+            std::cout << entry.mode << " " << type << " " << bytesToHex(entry.sha1Bytes) << "\t" << entry.filename << "\n";
+        }
+    }
+
+    return EXIT_SUCCESS;
+}
+
+// =================================================================
+// File: src/commands/write_tree.cpp
+// =================================================================
+
+#include "../include/write_tree.h"
+#include "../include/hash_object.h"
+#include "../include/object_utils.h"
+#include "../include/constants.h"
+#include "../include/sha1_utils.h"
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <iterator>
+#include <optional>
+
+std::optional<std::vector<std::byte>> writeTreeFromDirectory(const std::filesystem::path& dirPath) {
+    std::vector<TreeEntry> entries;
+
+    std::vector<std::filesystem::directory_entry> files;
+    for (const auto& entry : std::filesystem::directory_iterator(dirPath)) {
+        files.push_back(entry);
+    }
+    std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) {
+        return a.path().filename() < b.path().filename();
+    });
+
+    for (const auto& file : files) {
+        auto filename = file.path().filename().string();
+        if (filename == constants::GIT_DIR_NAME) {
+            continue;
+        }
+
+        TreeEntry entry;
+        entry.filename = filename;
+
+        if (file.is_directory()) {
+            entry.mode = constants::MODE_TREE;
+            auto sha1Opt = writeTreeFromDirectory(file.path());
+            if (!sha1Opt) return std::nullopt; // Propagate failure
+            entry.sha1Bytes = *sha1Opt;
+        } else if (file.is_regular_file()) {
+            entry.mode = constants::MODE_BLOB;
+            auto sha1BytesOpt = createBlobAndGetRawSha(file.path()); 
+            if (!sha1BytesOpt) return std::nullopt;
+            entry.sha1Bytes = *sha1BytesOpt;
+        } else {
+            continue; // Skip symlinks, etc. for now
+        }
+        entries.push_back(entry);
+    }
+
+    // Construct the tree object content from the entries
+    std::vector<std::byte> treeContent;
+    for (const auto& entry : entries) {
+        std::string entryStr = entry.mode + " " + entry.filename + '\0';
+        std::transform(entryStr.begin(), entryStr.end(), std::back_inserter(treeContent), 
+                       [](char c){ return std::byte(c); });
+        treeContent.insert(treeContent.end(), entry.sha1Bytes.begin(), entry.sha1Bytes.end());
+    }
+
+    // Construct the full object with header
+    std::string header = "tree " + std::to_string(treeContent.size()) + '\0';
+    std::vector<std::byte> fullTreeObject;
+    std::transform(header.begin(), header.end(), std::back_inserter(fullTreeObject),
+                   [](char c){ return std::byte(c); });
+    fullTreeObject.insert(fullTreeObject.end(), treeContent.begin(), treeContent.end());
+    
+    auto sha1HexOpt = writeGitObject(fullTreeObject);
+    if (!sha1HexOpt) {
+        return std::nullopt;
+    }
+    
+    return hexToBytes(*sha1HexOpt);
+}
+
+int handleWriteTree(int argc, char* argv[]) {
+    auto sha1BytesOpt = writeTreeFromDirectory(".");
+    if (sha1BytesOpt) {
+        std::cout << bytesToHex(*sha1BytesOpt) << "\n";
+        return EXIT_SUCCESS;
+    }
+    std::cerr << "Failed to write tree object.\n";
+    return EXIT_FAILURE;
+}
+
+// =================================================================
+// File: src/include/cat_file.h
+// =================================================================
+
+#pragma once
+int handleCatFile(int argc, char* argv[]);
+
+// =================================================================
+// File: src/include/constants.h
+// =================================================================
+
+#pragma once
+
+#include <string_view>
+#include <filesystem>
+
+// This file centralizes constants to avoid "magic strings" scattered in the code.
+// Using string_view is efficient as it avoids string constructions.
+
+namespace constants {
+    constexpr std::string_view GIT_DIR_NAME = ".git";
+    constexpr std::string_view OBJECTS_DIR_NAME = "objects";
+    constexpr std::string_view REFS_DIR_NAME = "refs";
+    constexpr std::string_view HEAD_FILE_NAME = "HEAD";
+    
+    constexpr std::string_view MODE_BLOB = "100644";
+    constexpr std::string_view MODE_TREE = "040000";
+
+    const std::filesystem::path GIT_DIR = ".git";
+    const std::filesystem::path OBJECTS_DIR = GIT_DIR / "objects";
+}
+
+// =================================================================
+// File: src/include/hash_object.h
+// =================================================================
+
+#pragma once
+#include <string>
+#include <vector>
+#include <optional>
+#include <filesystem>
+
+// Handles `git hash-object -w <file>`
+int handleHashObject(int argc, char* argv[]);
+
+std::optional<std::vector<std::byte>> createBlobAndGetRawSha(const std::filesystem::path& filePath);
+
+
+// =================================================================
+// File: src/include/init.h
+// =================================================================
+
+#pragma once
+int handleInit();
+
+// =================================================================
+// File: src/include/ls_tree.h
+// =================================================================
+
+#pragma once
+
+int handleLsTree(int argc, char* argv[]);
+
+// =================================================================
+// File: src/include/object_utils.h
+// =================================================================
+
+#pragma once
+
+#include <string>
+#include <vector>
+#include <optional>
+#include <cstddef>
+#include <span>
+
+// Represents a single entry (file or directory) within a Git tree object.
+struct TreeEntry {
+    std::string mode;
+    std::string filename;
+    std::vector<std::byte> sha1Bytes; // 20-byte raw SHA1 hash
+};
+
+
+// Reads and decompresses a git object from the .git/objects directory
+std::optional<std::vector<std::byte>> readGitObject(const std::string& sha1Hex);
+
+// Hashes, compresses, and writes content to the .git/objects directory.
+// Returns the hex SHA-1 hash of the object on success.
+std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> content);
+
+// Helper to find the first null separator in a byte span
+std::span<const std::byte>::iterator findNullSeparator(std::span<const std::byte> data);
+
+// =================================================================
+// File: src/include/sha1_utils.h
+// =================================================================
+
+#pragma once
+#include <string>
+#include <vector>
+#include <span>
+
+std::vector<std::byte> calculateSha1(std::span<const std::byte> data);
+
+std::string bytesToHex(std::span<const std::byte> bytes);
+
+std::string calculateSha1Hex(std::span<const std::byte> data);
+
+std::vector<std::byte> hexToBytes(const std::string& hex);
+
+// =================================================================
+// File: src/include/tree_parser.h
+// =================================================================
+
+#pragma once
+#include <string>
+#include <vector>
+#include "object_utils.h"
+
+// Parses a Git tree object into TreeEntry structs
+std::optional<std::vector<TreeEntry>> parseTreeObject(std::span<const std::byte> treeContent);
+
+// =================================================================
+// File: src/include/write_tree.h
+// =================================================================
+
+#pragma once
+#include <vector>
+#include <filesystem>
+#include <optional>
+
+int handleWriteTree(int argc, char* argv[]);
+std::optional<std::vector<std::byte>> writeTreeFromDirectory(const std::filesystem::path& dirPath);
+
+// =================================================================
+// File: src/include/zlib_utils.h
+// =================================================================
+
+#pragma once
+#include <vector>
+#include <string>
+#include <span>
+
+bool decompressZlib(std::span<const std::byte> input, std::vector<std::byte>& output);
+bool compressZlib(std::span<const std::byte> input, std::vector<std::byte>& output);
+
+// =================================================================
+// File: src/main.cpp
+// =================================================================
+
+#include <iostream>
+#include <string>
+#include <zlib.h>
+#include <vector>
+#include <iterator>
+#include <algorithm>
+#include <openssl/sha.h>
+#include "include/init.h"
+#include "include/cat_file.h"
+#include "include/hash_object.h"
+#include "include/ls_tree.h"
+#include "include/write_tree.h"
+
+
+int main(int argc, char* argv[]) {
+    // Flush after every std::cout / std::cerr
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
+
+    // You can use print statements as follows for debugging, they'll be visible when running tests.
+    std::cerr << "Logs from your program will appear here!\n";
+
+    // Uncomment this block to pass the first stage
+    if (argc < 2) {
+        std::cerr << "No command provided.\n";
+        return EXIT_FAILURE;
+    }
+
+    const std::string command = argv[1];
+    if (command == "init") {
+        return handleInit();
+    } else if (command == "hash-object") {
+        return handleHashObject(argc, argv);
+    } else if (command == "cat-file") {
+        return handleCatFile(argc, argv);
+    } else if (command == "ls-tree") {
+        return handleLsTree(argc, argv);
+    } else if (command == "write-tree"){
+        return handleWriteTree(argc, argv);
+    }
+
+        std::cerr << "Unknown command: " << command << "\n";
+        return EXIT_FAILURE;
+}
+
+
+
+// =================================================================
+// File: src/utils/object_utils.cpp
+// =================================================================
+
+#include "../include/object_utils.h"
+#include "../include/constants.h"
+#include "../include/sha1_utils.h"
+#include "../include/zlib_utils.h"
+
+#include <fstream>
+#include <filesystem>
+#include <iostream>
+#include <algorithm>
+
+std::optional<std::vector<std::byte>> readGitObject(const std::string& sha1Hex) {
+    if (sha1Hex.length() != 40) {
+        return std::nullopt;
+    }
+    const auto objectPath = constants::OBJECTS_DIR / sha1Hex.substr(0, 2) / sha1Hex.substr(2);
+
+    if (!std::filesystem::exists(objectPath)) {
+        return std::nullopt;
+    }
+
+    std::ifstream objectFile(objectPath, std::ios::binary);
+    if (!objectFile) {
+        return std::nullopt;
+    }
+
+    // Read entire file into a buffer
+    objectFile.seekg(0, std::ios::end);
+    std::streamsize size = objectFile.tellg();
+    objectFile.seekg(0, std::ios::beg);
+
+    std::vector<std::byte> compressedData(size);
+    if (!objectFile.read(reinterpret_cast<char*>(compressedData.data()), size)) {
+        return std::nullopt;
+    }
+
+    std::vector<std::byte> decompressedData;
+    if (!decompressZlib(compressedData, decompressedData)) {
+        return std::nullopt;
+    }
+
+    return decompressedData;
+}
+
+std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> content) {
+    // 1. Compute SHA-1
+    std::vector<std::byte> sha1Bytes = calculateSha1(content);
+
+    // 2. Convert the raw hash to hex *only* for creating the file path.
+    std::string sha1Hex = bytesToHex(sha1Bytes);
+
+    // 3. Prepare object path
+    const auto dir = constants::OBJECTS_DIR / sha1Hex.substr(0, 2);
+    const auto filePath = dir / sha1Hex.substr(2);
+
+    // Don't rewrite if it already exists
+    if (std::filesystem::exists(filePath)) {
+        return sha1Bytes;
+    }
+
+    // 3. Compress object data
+    std::vector<std::byte> compressedData;
+    if (!compressZlib(content, compressedData)) {
+        std::cerr << "Compression failed\n";
+        return std::nullopt;
+    }
+    
+    // 4. Write compressed object to disk
+    try {
+        std::filesystem::create_directories(dir);
+        std::ofstream outFile(filePath, std::ios::binary | std::ios::trunc);
+        if (!outFile) {
+             return std::nullopt;
+        }
+        outFile.write(reinterpret_cast<const char*>(compressedData.data()), compressedData.size());
+    } catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "Filesystem error: " << e.what() << '\n';
+        return std::nullopt;
+    }
+
+    return sha1Bytes;
+}
+
+std::span<const std::byte>::iterator findNullSeparator(std::span<const std::byte> data) {
+    return std::find(data.begin(), data.end(), std::byte{0});
+}
+
+// =================================================================
+// File: src/utils/sha1_utils.cpp
+// =================================================================
+
+#include "../include/sha1_utils.h"
+#include <openssl/sha.h>
+#include <sstream>
+#include <iomanip>
+#include <stdexcept>
+#include <span>
+
+std::vector<std::byte> calculateSha1(std::span<const std::byte> data) {
+    std::vector<std::byte> hash(SHA_DIGEST_LENGTH);
+    SHA1(reinterpret_cast<const unsigned char*>(data.data()), data.size(),
+         reinterpret_cast<unsigned char*>(hash.data()));
+    return hash;
+}
+
+std::string bytesToHex(std::span<const std::byte> bytes) {
+    std::ostringstream result;
+    result << std::hex << std::setfill('0');
+    for (const auto& byte : bytes) {
+        result << std::setw(2) << static_cast<unsigned int>(byte);
+    }
+    return result.str();
+}
+
+std::string calculateSha1Hex(std::span<const std::byte> data) {
+    return bytesToHex(calculateSha1(data));
+}
+
+std::vector<std::byte> hexToBytes(const std::string& hex) {
+    if (hex.length() % 2 != 0) {
+        throw std::invalid_argument("Hex string must have an even number of characters");
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(hex.length() / 2);
+    for (unsigned int i = 0; i < hex.length(); i += 2) {
+        std::string byteString = hex.substr(i, 2);
+        bytes.push_back(static_cast<std::byte>(std::stoul(byteString, nullptr, 16)));
+    }
+    return bytes;
+}
+
+// =================================================================
+// File: src/utils/tree_parser.cpp
+// =================================================================
+
+#include "../include/tree_parser.h"
+#include <iostream>
+#include <algorithm>
+#include <span>
+
+std::optional<std::vector<TreeEntry>> parseTreeObject(std::span<const std::byte> treeContent) {
+    std::vector<TreeEntry> entries;
+    auto current = treeContent.begin();
+
+    while (current != treeContent.end()) {
+        TreeEntry entry;
+
+        // Find space after mode
+        auto spacePos = std::find(current, treeContent.end(), std::byte{' '});
+        if (spacePos == treeContent.end()) return std::nullopt; // Malformed
+        entry.mode = std::string(reinterpret_cast<const char*>(&*current), std::distance(current, spacePos));
+
+        // Find null after filename
+        auto nullPos = std::find(spacePos + 1, treeContent.end(), std::byte{0});
+        if (nullPos == treeContent.end()) return std::nullopt; // Malformed
+        entry.filename = std::string(reinterpret_cast<const char*>(&*(spacePos + 1)), std::distance(spacePos + 1, nullPos));
+
+        // SHA1 is the next 20 bytes
+        auto shaStart = nullPos + 1;
+        if (std::distance(shaStart, treeContent.end()) < 20) return std::nullopt; // Not enough bytes for SHA
+        auto shaEnd = shaStart + 20;
+        entry.sha1Bytes.assign(shaStart, shaEnd);
+        
+        entries.push_back(entry);
+        current = shaEnd;
+    }
+
+    return entries;
+}
+
+// =================================================================
+// File: src/utils/zlib_utils.cpp
+// =================================================================
+
+#include "../include/zlib_utils.h"
+#include <zlib.h>
+#include <span>
+
+
+bool decompressZlib(std::span<const std::byte> input, std::vector<std::byte>& output) {
+    // Start with a reasonable guess for the output size.
+    // Git objects often have good compression, so 3x is a safe starting point.
+    size_t output_size = input.size() * 3;
+    if (output_size < 1024) output_size = 1024; // Minimum buffer size
+    output.resize(output_size);
+
+    while (true) {
+        uLongf destLen = output.size();
+        int res = uncompress(
+            reinterpret_cast<Bytef*>(output.data()), &destLen,
+            reinterpret_cast<const Bytef*>(input.data()), input.size()
+        );
+
+        if (res == Z_OK) {
+            output.resize(destLen); // Shrink buffer to actual decompressed size
+            return true;
+        }
+
+        if (res == Z_BUF_ERROR) {
+            // Output buffer was too small. Double it and try again.
+            if (output.size() > 10 * 1024 * 1024) return false; // Safety break for huge files
+            output.resize(output.size() * 2);
+        } else {
+            // Some other zlib error occurred
+            return false;
+        }
+    }
+}
+
+bool compressZlib(std::span<const std::byte> input, std::vector<std::byte>& output) {
+    uLong sourceLen = input.size();
+    uLong destLen = compressBound(sourceLen);
+    output.resize(destLen);
+
+    int result = compress(
+        reinterpret_cast<Bytef*>(output.data()), &destLen,
+        reinterpret_cast<const Bytef*>(input.data()), sourceLen
+    );
+
+    if (result != Z_OK) {
+        return false;
+    }
+
+    output.resize(destLen); // Shrink buffer to actual compressed size
+    return true;
+}
+
