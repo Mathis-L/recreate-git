@@ -33,9 +33,9 @@ std::optional<std::vector<std::byte>> writeTreeFromDirectory(const std::filesyst
 
         if (file.is_directory()) {
             entry.mode = constants::MODE_TREE;
-            auto sha1Opt = writeTreeFromDirectory(file.path());
-            if (!sha1Opt) return std::nullopt; // Propagate failure
-            entry.sha1Bytes = *sha1Opt;
+            auto sha1BytesOpt = writeTreeFromDirectory(file.path());
+            if (!sha1BytesOpt) return std::nullopt;
+            entry.sha1Bytes = *sha1BytesOpt;
         } else if (file.is_regular_file()) {
             entry.mode = constants::MODE_BLOB;
             auto sha1BytesOpt = createBlobAndGetRawSha(file.path()); 
@@ -47,7 +47,7 @@ std::optional<std::vector<std::byte>> writeTreeFromDirectory(const std::filesyst
         entries.push_back(entry);
     }
 
-    // Construct the tree object content from the entries
+    // Construct the tree object content from the entries "mode filename\0rawSha1Bytes"
     std::vector<std::byte> treeContent;
     for (const auto& entry : entries) {
         std::string entryStr = entry.mode + " " + entry.filename + '\0';
@@ -56,25 +56,22 @@ std::optional<std::vector<std::byte>> writeTreeFromDirectory(const std::filesyst
         treeContent.insert(treeContent.end(), entry.sha1Bytes.begin(), entry.sha1Bytes.end());
     }
 
-    // Construct the full object with header
+    // Construct the full object with header 
     std::string header = "tree " + std::to_string(treeContent.size()) + '\0';
     std::vector<std::byte> fullTreeObject;
     std::transform(header.begin(), header.end(), std::back_inserter(fullTreeObject),
                    [](char c){ return std::byte(c); });
     fullTreeObject.insert(fullTreeObject.end(), treeContent.begin(), treeContent.end());
     
-    auto sha1HexOpt = writeGitObject(fullTreeObject);
-    if (!sha1HexOpt) {
-        return std::nullopt;
-    }
+    auto sha1BytesOpt = writeGitObject(fullTreeObject);
     
-    return hexToBytes(*sha1HexOpt);
+    return sha1BytesOpt;
 }
 
 int handleWriteTree(int argc, char* argv[]) {
     auto sha1BytesOpt = writeTreeFromDirectory(".");
     if (sha1BytesOpt) {
-        std::cout << bytesToHex(*sha1BytesOpt) << "\n";
+        std::cout << bytesToHex(*sha1BytesOpt) << "\n"; // The * dereferences sha1BytesOpt, which means it accesses the value stored within the optional object.
         return EXIT_SUCCESS;
     }
     std::cerr << "Failed to write tree object.\n";
