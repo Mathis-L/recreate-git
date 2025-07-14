@@ -87,7 +87,6 @@ int handleClone(int argc, char* argv[]){
     if (bodyResp.status_code == 200) {
         std::cout << "Requête réussie ! Le serveur a répondu.\n";
         std::cout << "La taille de la réponse (packfile brut) est de : " << bodyResp.text.length() << " octets.\n";
-        std::cerr << "Réponse du serveur : " << bodyResp.text << "\n";
     } else {
         std::cerr << "Erreur lors de la requête POST.\n";
         std::cerr << "Code de statut : " << bodyResp.status_code << "\n";
@@ -97,7 +96,15 @@ int handleClone(int argc, char* argv[]){
     }
 
     //4. RECEIVE AND DEMULTIPLEX THE RESPONSE
+    const std::string& raw_response = bodyResp.text;
 
+    auto packfile_opt = readPackFile(raw_response);
+
+    if (!packfile_opt){
+        std::cerr << "Couldn't read the packfile \n";
+        return EXIT_FAILURE;
+    }
+    std::cout << "SUCCESS READING PACKFILE\n";
 
     return EXIT_SUCCESS;
 
