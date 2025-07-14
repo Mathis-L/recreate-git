@@ -56,4 +56,6 @@ vcpkg_installed
 
 tmp/
 *.py
-*.txt
+combined_code.txt
+.vscode
+.codecrafters

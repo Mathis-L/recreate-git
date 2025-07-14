@@ -5,12 +5,14 @@
 #include <iterator>
 #include <algorithm>
 #include <openssl/sha.h>
+
 #include "include/init.h"
 #include "include/cat_file.h"
 #include "include/hash_object.h"
 #include "include/ls_tree.h"
 #include "include/write_tree.h"
 #include "include/commit_tree.h"
+#include "include/clone.h"
 
 
 int main(int argc, char* argv[]) {
@@ -40,9 +42,11 @@ int main(int argc, char* argv[]) {
         return handleWriteTree(argc, argv);
     } else if (command == "commit-tree"){
         return handleCommitTree(argc, argv);
+    } else if (command == "clone"){
+        return handleClone(argc, argv);
     }
 
-        std::cerr << "Unknown command: " << command << "\n";
-        return EXIT_FAILURE;
+    std::cerr << "Unknown command: " << command << "\n";
+    return EXIT_FAILURE;
 }
 
