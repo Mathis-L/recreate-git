@@ -37,17 +37,31 @@ struct PackObjectInfo {
     std::string delta_ref; 
 };
 
+struct PendingDeltaObject {
+    PackObjectInfo info;
+    std::vector<std::byte> delta_data;
+};
+
+
 class PackfileParser {
 public:
     // Le constructeur prend le vecteur d'octets du packfile.
     PackfileParser(const std::vector<std::byte>& packfile_data);
 
     // La méthode principale qui lance l'analyse.
-    std::optional<std::vector<PackObjectInfo>> parse();
+    std::optional<std::vector<PackObjectInfo>> parseAndResolve();
+
+    // Permet de récupérer les données brutes (sans en-tête) des objets résolus
+    // La clé est le SHA-1 de l'objet.
+    const std::map<std::string, std::vector<std::byte>>& getResolvedObjectsData() const;
 
 private:
     const std::vector<std::byte>& m_packfile;
     size_t m_cursor;
+
+    std::map<std::string, std::vector<std::byte>> m_object_data_cache; // sha1 -> raw_data
+    std::map<std::string, GitObjectType> m_object_type_cache;          // sha1 -> type
+    std::map<size_t, std::string> m_offset_to_sha_map;                 // offset -> sha1
 
     // Lit un entier 32-bit Big Endian et avance le curseur.
     uint32_t read_big_endian_32();
@@ -57,6 +71,10 @@ private:
 
     // La fonction la plus importante: parse un seul objet.
     PackObjectInfo parse_object(); 
+
+    // Lit un entier à taille variable (utilisé pour les tailles d'objet et les en-têtes de delta)
+    uint64_t read_variable_length_integer(size_t& cursor, const std::vector<std::byte>& data);
+    std::vector<std::byte> apply_delta(const std::vector<std::byte>& base, const std::vector<std::byte>& delta_instructions);
     
     // Décompresse les données à partir du curseur actuel en utilisant zlib.
     std::pair<std::vector<std::byte>, size_t> decompress_data(size_t uncompressed_size);

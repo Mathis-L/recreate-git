@@ -14,29 +14,187 @@
 
 PackfileParser::PackfileParser(const std::vector<std::byte>& packfile_data): m_packfile(packfile_data), m_cursor(0) {}
 
-std::optional<std::vector<PackObjectInfo>> PackfileParser::parse() {
-    if (m_packfile.size() < 12) {
-        return std::nullopt;
-    }
+const std::map<std::string, std::vector<std::byte>>& PackfileParser::getResolvedObjectsData() const {
+    return m_object_data_cache;
+}
 
-    if (!verify_header()){
+std::optional<std::vector<PackObjectInfo>> PackfileParser::parseAndResolve() {
+    if (m_packfile.size() < 12 || !verify_header()) {
         return std::nullopt;
     }
     
     uint32_t num_objects = read_big_endian_32();
-    std::cout << "num_objecs valid :  " << num_objects << std::endl;
-    std::cout << "m_cursor = " << m_cursor << std::endl;
-    std::vector<PackObjectInfo> objects;
-    objects.reserve(num_objects);
+    std::cout << "Nombre d'objets déclaré dans le packfile : " << num_objects << std::endl;
 
+    m_object_data_cache.clear();
+    m_object_type_cache.clear();
+    m_offset_to_sha_map.clear();
+
+    std::vector<PackObjectInfo> final_objects;
+    std::vector<PendingDeltaObject> pending_deltas;
+
+    // ======================================================
+    // PASSE 1: PARSE TOUS LES OBJETS, MET LES DELTAS EN ATTENTE
+    // ======================================================
     for (uint32_t i = 0; i < num_objects; ++i) {
-        objects.push_back(parse_object());
+        PackObjectInfo info;
+        info.offset_in_packfile = m_cursor;
+
+        // 1. Décode l'en-tête de l'objet (type et taille)
+        size_t header_start_cursor = m_cursor;
+        
+        std::byte first_byte = m_packfile[m_cursor++];
+        info.type = static_cast<GitObjectType>((static_cast<uint8_t>(first_byte) >> 4) & 0x7);
+        
+        uint64_t size = static_cast<uint8_t>(first_byte) & 0x0F;
+        int shift = 4;
+        while ((static_cast<uint8_t>(first_byte) & 0x80) != 0) {
+            first_byte = m_packfile[m_cursor++];
+            size |= (static_cast<uint64_t>(static_cast<uint8_t>(first_byte) & 0x7F)) << shift;
+            shift += 7;
+        }
+        info.uncompressed_size = size;
+        
+        // 2. Gère les deltas pour identifier leur base
+        if (info.type == GitObjectType::REF_DELTA) {
+            std::span<const std::byte> sha1_ref_span(&m_packfile[m_cursor], 20);
+            info.delta_ref = bytesToHex(sha1_ref_span);
+            m_cursor += 20;
+        } else if (info.type == GitObjectType::OFS_DELTA) {
+            uint64_t offset_delta = read_variable_length_integer(m_cursor, m_packfile);
+            size_t base_offset = info.offset_in_packfile - offset_delta;
+            // On stocke l'offset de base sous forme de string pour réutiliser le champ delta_ref.
+            info.delta_ref = std::to_string(base_offset);
+        }
+
+        // 3. Décompresse les données (objet complet ou instructions delta)
+        size_t data_start_cursor = m_cursor;
+        auto [data, bytes_consumed] = decompress_data(info.uncompressed_size);
+        m_cursor = data_start_cursor + bytes_consumed;
+        info.size_in_packfile = m_cursor - info.offset_in_packfile;
+
+        // 4. Stocke l'objet ou le met en attente
+        if (info.type != GitObjectType::OFS_DELTA && info.type != GitObjectType::REF_DELTA) {
+            // C'est un objet de base, on calcule son SHA et on le met en cache
+            std::string header = typeToStringMap.at(info.type) + " " + std::to_string(data.size()) + '\0';
+            std::vector<std::byte> full_object_data;
+            full_object_data.reserve(header.size() + data.size());
+            std::transform(header.begin(), header.end(), std::back_inserter(full_object_data), 
+                            [](char c){ return static_cast<std::byte>(c); });
+            full_object_data.insert(full_object_data.end(), data.begin(), data.end());
+            
+            info.sha1 = calculateSha1Hex(full_object_data);
+            
+            // Mise en cache
+            m_object_data_cache[info.sha1] = data;
+            m_object_type_cache[info.sha1] = info.type;
+            m_offset_to_sha_map[info.offset_in_packfile] = info.sha1;
+
+            final_objects.push_back(info);
+        } else {
+            // C'est un delta, on le met en attente
+            pending_deltas.push_back({info, data});
+        }
     }
 
-    // Vérification finale du checksum du packfile (20 derniers octets)
+    // ======================================================
+    // PASSE 2: RÉSOUT LES DELTAS (EN PLUSIEURS PASSES SI NÉCESSAIRE)
+    // ======================================================
+    size_t passes = 0;
+    while (!pending_deltas.empty()) {
+        if (passes++ > num_objects) { // Sécurité pour éviter les boucles infinies
+            std::cerr << "Error: Could not resolve all deltas, possible missing base or circular dependency." << std::endl;
+            break;
+        }
+        
+        size_t resolved_count_this_pass = 0;
+        std::vector<PendingDeltaObject> next_pending_deltas;
 
-    return objects;
+        for (const auto& pending : pending_deltas) {
+            std::string base_sha1;
+            
+            // Trouve le SHA-1 de l'objet de base
+            if (pending.info.type == GitObjectType::OFS_DELTA) {
+                size_t base_offset = std::stoull(pending.info.delta_ref);
+                auto it = m_offset_to_sha_map.find(base_offset);
+                if (it == m_offset_to_sha_map.end()) {
+                    next_pending_deltas.push_back(pending); // Base pas encore disponible, on réessaie plus tard
+                    continue;
+                }
+                base_sha1 = it->second;
+            } else { // REF_DELTA
+                base_sha1 = pending.info.delta_ref;
+            }
+
+            // Récupère les données et le type de la base depuis le cache
+            auto base_data_it = m_object_data_cache.find(base_sha1);
+            auto base_type_it = m_object_type_cache.find(base_sha1);
+
+            if (base_data_it == m_object_data_cache.end() || base_type_it == m_object_type_cache.end()) {
+                next_pending_deltas.push_back(pending); // Base pas encore disponible
+                continue;
+            }
+            
+            // On a trouvé la base, on peut résoudre le delta
+            const auto& base_data = base_data_it->second;
+            const auto& base_type = base_type_it->second;
+            
+            std::vector<std::byte> resolved_data = apply_delta(base_data, pending.delta_data);
+
+            PackObjectInfo resolved_info = pending.info;
+            resolved_info.type = base_type; // Le type de l'objet résolu est celui de sa base !
+
+            // Calcule le SHA-1 de l'objet nouvellement reconstruit
+            std::string header = typeToStringMap.at(resolved_info.type) + " " + std::to_string(resolved_data.size()) + '\0';
+            std::vector<std::byte> full_object_data;
+            std::transform(header.begin(), header.end(), std::back_inserter(full_object_data), 
+                            [](char c){ return static_cast<std::byte>(c); });
+            full_object_data.insert(full_object_data.end(), resolved_data.begin(), resolved_data.end());
+
+            resolved_info.sha1 = calculateSha1Hex(full_object_data);
+            
+            // Ajoute l'objet résolu aux caches pour qu'il puisse servir de base à son tour
+            m_object_data_cache[resolved_info.sha1] = resolved_data;
+            m_object_type_cache[resolved_info.sha1] = resolved_info.type;
+            m_offset_to_sha_map[resolved_info.offset_in_packfile] = resolved_info.sha1;
+            
+            final_objects.push_back(resolved_info);
+            resolved_count_this_pass++;
+        }
+
+        if (resolved_count_this_pass == 0 && !next_pending_deltas.empty()) {
+             std::cerr << "Error: Made no progress in resolving deltas on this pass." << std::endl;
+             break;
+        }
+
+        pending_deltas = next_pending_deltas;
+    }
+    
+    // Trie les objets par offset pour correspondre à l'ordre original du packfile
+    std::sort(final_objects.begin(), final_objects.end(), [](const auto& a, const auto& b){
+        return a.offset_in_packfile < b.offset_in_packfile;
+    });
+
+    return final_objects;
 }
+
+
+uint64_t PackfileParser::read_variable_length_integer(size_t& cursor, const std::vector<std::byte>& data) {
+    uint64_t value = 0;
+    int shift = 0;
+    std::byte current_byte;
+    do {
+        if (cursor >= data.size()) {
+            throw std::runtime_error("Unexpected end of data while reading variable-length integer.");
+        }
+        current_byte = data[cursor++];
+        uint64_t chunk = static_cast<uint64_t>(static_cast<uint8_t>(current_byte) & 0x7F);
+        value |= (chunk << shift);
+        shift += 7;
+    } while ((static_cast<uint8_t>(current_byte) & 0x80) != 0);
+    return value;
+}
+
 
 uint32_t PackfileParser::read_big_endian_32() {
     uint32_t value = 0;
@@ -65,67 +223,6 @@ bool PackfileParser::verify_header() {
     std::cout << "m_cursor = " << m_cursor << std::endl;
     return true;
 }
-
-
-PackObjectInfo PackfileParser::parse_object() {
-    PackObjectInfo info;
-    info.offset_in_packfile = m_cursor;
-
-    // 1. Décoder l'en-tête de l'objet (type et taille)
-    std::byte first_byte = m_packfile[m_cursor++];
-    info.type = static_cast<GitObjectType>((static_cast<uint8_t>(first_byte) >> 4) & 0x7);
-    info.uncompressed_size = static_cast<uint8_t>(first_byte) & 0xF;
-    
-    int shift = 4;
-    while ((static_cast<uint8_t>(first_byte) & 0x80) != 0) {
-        first_byte = m_packfile[m_cursor++];
-        info.uncompressed_size |= (static_cast<uint64_t>(static_cast<uint8_t>(first_byte) & 0x7F)) << shift;
-        shift += 7;
-    }
-
-    std::cout << "info.offset_in_packfile = " << info.offset_in_packfile << std::endl;
-    std::cout << "info.uncompressed_size = " << info.uncompressed_size << std::endl;
-    
-    // 2. Gérer les deltas
-    if (info.type == GitObjectType::OFS_DELTA) {
-        // ... non implémenté pour la simplicité
-    } else if (info.type == GitObjectType::REF_DELTA) {
-        // MODIFICATION: Utilisation de tes fonctions utilitaires
-        // On crée un span sur les 20 octets du SHA1 et on le convertit en hex.
-        std::span<const std::byte> sha1_ref_span(&m_packfile[m_cursor], 20);
-        info.delta_ref = bytesToHex(sha1_ref_span);
-        std::cout << "info.delta_ref = " << info.delta_ref << std::endl;
-        m_cursor += 20;
-    }
-
-    size_t data_start_cursor = m_cursor;
-
-    // 3. Décompresser les données
-    auto [uncompressed_data, bytes_consumed] = decompress_data(info.uncompressed_size);
-    
-    std::cout << "BYTES_CONSUMED = " << bytes_consumed << std::endl;
-    m_cursor = data_start_cursor + bytes_consumed;
-    info.size_in_packfile = m_cursor - info.offset_in_packfile;
-    std::cout << "info.size_in_packfile = " << info.size_in_packfile << std::endl;
-
-    // 4. Calculer le SHA-1 de l'objet (sauf pour les deltas)
-    if (info.type != GitObjectType::OFS_DELTA && info.type != GitObjectType::REF_DELTA) {
-        // a. On construit l'objet complet ("type size\0" + contenu)
-        std::string header = typeToStringMap.at(info.type) + " " + std::to_string(uncompressed_data.size()) + '\0';
-        std::vector<std::byte> full_object_data;
-        full_object_data.reserve(header.size() + uncompressed_data.size());
-        std::transform(header.begin(), header.end(), std::back_inserter(full_object_data), 
-                        [](char c){ return static_cast<std::byte>(c); });
-        full_object_data.insert(full_object_data.end(), uncompressed_data.begin(), uncompressed_data.end());
-        
-        // b. On calcule le hash sur l'objet complet
-        info.sha1 = calculateSha1Hex(full_object_data);
-         std::cout << "info.sha1 = " << info.sha1 << std::endl << std::endl;
-    }
-
-    return info;
-}
-
 
 std::pair<std::vector<std::byte>, size_t> PackfileParser::decompress_data(size_t uncompressed_size) {
     // Si uncompressed_size est 0, on sait que le résultat est un vecteur vide.
@@ -184,3 +281,73 @@ std::pair<std::vector<std::byte>, size_t> PackfileParser::decompress_data(size_t
     return {out_buffer, bytes_consumed};
 }
 
+std::vector<std::byte> PackfileParser::apply_delta(const std::vector<std::byte>& base, const std::vector<std::byte>& delta_instructions) {
+    size_t cursor = 0;
+
+    // 1. Lire la taille de l'objet de base (source)
+    uint64_t base_size = read_variable_length_integer(cursor, delta_instructions);
+    if (base_size != base.size()) {
+        throw std::runtime_error("Delta error: Mismatched base size.");
+    }
+
+    // 2. Lire la taille de l'objet résultant (cible)
+    uint64_t target_size = read_variable_length_integer(cursor, delta_instructions);
+    
+    std::vector<std::byte> result_data;
+    result_data.reserve(target_size);
+
+    // 3. Lire et appliquer les instructions
+    while (cursor < delta_instructions.size()) {
+        std::byte control_byte = delta_instructions[cursor++];
+        
+        if ((static_cast<uint8_t>(control_byte) & 0x80) != 0) {
+            // Cas B : Instruction de COPIE (MSB = 1)
+            uint64_t offset = 0;
+            uint64_t size = 0;
+            
+            // Lire l'offset (4 bits de flag)
+            if ((static_cast<uint8_t>(control_byte) & 0x01) != 0) offset |= static_cast<uint64_t>(delta_instructions[cursor++]);
+            if ((static_cast<uint8_t>(control_byte) & 0x02) != 0) offset |= (static_cast<uint64_t>(delta_instructions[cursor++]) << 8);
+            if ((static_cast<uint8_t>(control_byte) & 0x04) != 0) offset |= (static_cast<uint64_t>(delta_instructions[cursor++]) << 16);
+            if ((static_cast<uint8_t>(control_byte) & 0x08) != 0) offset |= (static_cast<uint64_t>(delta_instructions[cursor++]) << 24);
+
+            // Lire la taille (3 bits de flag)
+            if ((static_cast<uint8_t>(control_byte) & 0x10) != 0) size |= static_cast<uint64_t>(delta_instructions[cursor++]);
+            if ((static_cast<uint8_t>(control_byte) & 0x20) != 0) size |= (static_cast<uint64_t>(delta_instructions[cursor++]) << 8);
+            if ((static_cast<uint8_t>(control_byte) & 0x40) != 0) size |= (static_cast<uint64_t>(delta_instructions[cursor++]) << 16);
+            
+            // Cas spécial : une taille de 0 est traitée comme 0x10000
+            if (size == 0) {
+                size = 0x10000;
+            }
+            
+            if (offset + size > base.size()) {
+                 throw std::runtime_error("Delta error: Copy instruction reads out of base object bounds.");
+            }
+            
+            // Copier les données depuis l'objet de base
+            result_data.insert(result_data.end(), base.begin() + offset, base.begin() + offset + size);
+
+        } else {
+            // Cas A : Instruction d'AJOUT (MSB = 0)
+            uint8_t add_size = static_cast<uint8_t>(control_byte) & 0x7F;
+            if (add_size == 0) {
+                throw std::runtime_error("Delta error: Add instruction with size 0 is invalid.");
+            }
+            
+            if (cursor + add_size > delta_instructions.size()) {
+                 throw std::runtime_error("Delta error: Add instruction reads out of delta data bounds.");
+            }
+
+            // Ajouter les données littérales depuis le flux delta
+            result_data.insert(result_data.end(), delta_instructions.begin() + cursor, delta_instructions.begin() + cursor + add_size);
+            cursor += add_size;
+        }
+    }
+    
+    if (result_data.size() != target_size) {
+        throw std::runtime_error("Delta error: Final reconstructed size does not match target size.");
+    }
+
+    return result_data;
+}

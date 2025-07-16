@@ -1,6 +1,7 @@
 #include "../include/clone.h"
 #include "../include/pkt_line_utils.h"
 #include "../include/packfile_utils.h"
+#include "../include/object_utils.h"
 
 #include <cpr/cpr.h>
 
@@ -113,7 +114,7 @@ int handleClone(int argc, char* argv[]){
     PackfileParser parser(packfile);
     
     // Lance l'analyse. Cette méthode peut lancer une exception si le packfile est corrompu.
-    auto objects_opt = parser.parse();
+    auto objects_opt = parser.parseAndResolve();
 
     if (!objects_opt){
         std::cerr << "Couldn't parse the packfile \n";
@@ -127,22 +128,63 @@ int handleClone(int argc, char* argv[]){
 
     // Affiche les informations de chaque objet, dans le format souhaité.
     for (const auto& obj : objects) {
-        // std::cout << obj.sha1 << " "
-        //             << typeToStringMap.at(obj.type) << " "
-        //             << obj.uncompressed_size << " "
-        //             << obj.size_in_packfile << " "
-        //             << obj.offset_in_packfile;
+        std::cout << obj.sha1 << " "
+                    << typeToStringMap.at(obj.type) << " "
+                    << obj.uncompressed_size << " "
+                    << obj.size_in_packfile << " "
+                    << obj.offset_in_packfile;
         if(!obj.delta_ref.empty()){
             // Pour les deltas, on affiche la profondeur (simplifiée à 1) et la référence de base.
             std::cout << " 1 " << obj.delta_ref;
         }
         std::cout << std::endl;
     }
-    std::cout << "--- End of analysis ---\n";
+     // NOUVELLE ÉTAPE 6 : ÉCRIRE LES OBJETS DANS LA BASE DE DONNÉES LOCALE
+    std::cout << "\nÉtape 6 : Écriture des objets dans .git/objects...\n";
+    
+    // On récupère les données brutes des objets résolus depuis le parser
+    const auto& resolved_data_map = parser.getResolvedObjectsData();
+    int written_count = 0;
+    
+    for (const auto& obj_info : objects) {
+        // On reconstruit le contenu complet de l'objet (en-tête + données)
+        // C'est ce contenu qui est hashé et compressé par Git.
+        
+        // a. Récupérer les données brutes de l'objet via son SHA
+        const auto& data = resolved_data_map.at(obj_info.sha1);
+        
+        // b. Construire l'en-tête Git ("<type> <taille>\0")
+        std::string header_str = typeToStringMap.at(obj_info.type) + " " + std::to_string(data.size()) + '\0';
 
+        // c. Concaténer l'en-tête et les données
+        std::vector<std::byte> full_object_content;
+        full_object_content.reserve(header_str.size() + data.size());
+        std::transform(header_str.begin(), header_str.end(), std::back_inserter(full_object_content), 
+                        [](char c){ return static_cast<std::byte>(c); });
+        full_object_content.insert(full_object_content.end(), data.begin(), data.end());
 
+        // d. Appeler ta fonction pour écrire l'objet sur le disque
+        if (writeGitObject(full_object_content)) {
+            written_count++;
+        } else {
+            std::cerr << "Erreur critique : impossible d'écrire l'objet " << obj_info.sha1 << " sur le disque.\n";
+            // On pourrait décider de s'arrêter ici ou de continuer
+            return EXIT_FAILURE;
+        }
+    }
+    
+    std::cout << written_count << " objets écrits avec succès dans le répertoire .git/objects.\n";
+
+    // ÉTAPE 7 : METTRE À JOUR HEAD (et autres refs)
+    // C'est la prochaine étape logique : il faut créer .git/HEAD pour qu'il pointe
+    // vers la branche principale (ex: "ref: refs/heads/main")
+    // et créer .git/refs/heads/main contenant le SHA du commit.
+    std::cout << "\nÉtape 7 : Mise à jour de HEAD...\n";
+    // ... (Code à implémenter pour la gestion des références)
+    // ...
+
+    std::cout << "\nClone terminé avec succès.\n";
     return EXIT_SUCCESS;
-
 }
 
 
