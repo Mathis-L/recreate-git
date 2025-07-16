@@ -13,7 +13,7 @@ namespace constants {
     constexpr std::string_view HEAD_FILE_NAME = "HEAD";
     
     constexpr std::string_view MODE_BLOB = "100644";
-    constexpr std::string_view MODE_TREE = "040000";
+    constexpr std::string_view MODE_TREE = "40000";
 
     constexpr std::string_view AUTHOR_NAME = "Mathis-L";
     constexpr std::string_view AUTHOR_EMAIL = "mathislafon@gmail.com";

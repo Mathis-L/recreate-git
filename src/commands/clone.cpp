@@ -2,6 +2,8 @@
 #include "../include/pkt_line_utils.h"
 #include "../include/packfile_utils.h"
 #include "../include/object_utils.h"
+#include "../include/checkout_utils.h" 
+#include "../include/init.h"
 
 #include <cpr/cpr.h>
 
@@ -13,19 +15,43 @@
 
 
 int handleClone(int argc, char* argv[]){
-    std::string baseUrl;
-    std::string dir;
+     std::string baseUrl;
+    std::filesystem::path targetDir; // Utilisons std::filesystem::path, c'est mieux
 
     if (argc == 4){
         baseUrl = argv[2];
-        dir = argv[3];
+        targetDir = argv[3];
     }
     else if (argc == 3){
         baseUrl = argv[2];
-        dir = ".";
+        // Extraire le nom du repo de l'URL pour le répertoire de destination
+        std::string repoName = baseUrl.substr(baseUrl.find_last_of('/') + 1);
+        if (repoName.size() > 4 && repoName.substr(repoName.size() - 4) == ".git") {
+            repoName = repoName.substr(0, repoName.size() - 4);
+        }
+        targetDir = repoName;
     }
     else{
-        std::cerr << "Usage: mygit clone <git-address> [<some-directory>]\n";
+        std::cerr << "Usage: mygit clone <git-address> [<directory>]\n";
+        return EXIT_FAILURE;
+    }
+
+    // Créer le répertoire de destination
+    if (std::filesystem::exists(targetDir)) {
+        if (!std::filesystem::is_directory(targetDir) || !std::filesystem::is_empty(targetDir)) {
+            std::cerr << "Fatal: destination path '" << targetDir.string() << "' already exists and is not an empty directory.\n";
+            return EXIT_FAILURE;
+        }
+    } else {
+        std::filesystem::create_directory(targetDir);
+    }
+
+    // Changer le répertoire de travail pour que .git/ soit créé au bon endroit
+    std::filesystem::current_path(targetDir);
+
+    // Initialiser le dépôt local (.git/objects, .git/refs, etc.)
+    if (handleInit() != EXIT_SUCCESS) {
+        std::cerr << "Fatal: failed to initialize repository in " << targetDir << "\n";
         return EXIT_FAILURE;
     }
 
@@ -176,14 +202,29 @@ int handleClone(int argc, char* argv[]){
     std::cout << written_count << " objets écrits avec succès dans le répertoire .git/objects.\n";
 
     // ÉTAPE 7 : METTRE À JOUR HEAD (et autres refs)
-    // C'est la prochaine étape logique : il faut créer .git/HEAD pour qu'il pointe
-    // vers la branche principale (ex: "ref: refs/heads/main")
-    // et créer .git/refs/heads/main contenant le SHA du commit.
-    std::cout << "\nÉtape 7 : Mise à jour de HEAD...\n";
-    // ... (Code à implémenter pour la gestion des références)
-    // ...
+    std::cout << "\nÉtape 7 : Mise à jour des références...\n";
+    try {
+        std::filesystem::path mainRefPath = std::filesystem::path(".git") / "refs" / "heads" / "main";
+        std::filesystem::create_directories(mainRefPath.parent_path());
+        std::ofstream mainRefFile(mainRefPath);
+        mainRefFile << *sha1HexMain << "\n";
 
-    std::cout << "\nClone terminé avec succès.\n";
+        std::ofstream headFile(std::filesystem::path(".git") / "HEAD");
+        headFile << "ref: refs/heads/main\n";
+        std::cout << "HEAD est maintenant sur 'main' (" << *sha1HexMain << ")\n";
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal: failed to update refs: " << e.what() << "\n";
+        return EXIT_FAILURE;
+    }
+
+    // NOUVELLE ÉTAPE 8 : CHECKOUT DES FICHIERS DANS LE RÉPERTOIRE DE TRAVAIL
+    std::cout << "\nÉtape 8 : Checkout des fichiers...\n";
+    if (!checkoutCommit(*sha1HexMain, ".")) { // "." car on a déjà changé de répertoire
+        std::cerr << "Fatal: Failed to checkout files from the main branch.\n";
+        return EXIT_FAILURE;
+    }
+    
+    std::cout << "\nClone terminé avec succès dans '" << targetDir.string() << "'.\n";
     return EXIT_SUCCESS;
 }
 
