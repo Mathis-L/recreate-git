@@ -122,8 +122,7 @@ std::optional<std::vector<std::byte>> readPackFile(const std::string& str){
 
         } else if (band_id == std::byte{2}) { // \x02 progress messages
             std::string message(reinterpret_cast<const char*>(content_span.data()), content_span.size());
-            std::cout << message;
-
+             std::cerr << "remote: " << message;
         } else if (band_id == std::byte{3}) { // \x03 error 
             std::string error_message(reinterpret_cast<const char*>(content_span.data()), content_span.size());
             std::cerr << "Error from remote: " << error_message;
