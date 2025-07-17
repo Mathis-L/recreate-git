@@ -83,3 +83,13 @@ std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> 
 std::span<const std::byte>::iterator findNullSeparator(std::span<const std::byte> data) {
     return std::find(data.begin(), data.end(), std::byte{0});
 }
+
+// A helper function to format a file/tree mode for user-friendly display.
+// Git's 'ls-tree' command shows modes as 6-digit numbers.
+std::string formatModeForDisplay(std::string_view mode) {
+    //a tree mode is stored as "40000" (5 digits) -> git correct format "040000"
+    if (mode.length() < 6) {
+        return "0" + std::string(mode);
+    }
+    return std::string(mode);
+}

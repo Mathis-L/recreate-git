@@ -23,3 +23,7 @@ std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> 
 
 // Helper to find the first null separator in a byte span
 std::span<const std::byte>::iterator findNullSeparator(std::span<const std::byte> data);
+
+// Formats the file mode for display, matching 'git ls-tree' output. 
+// 6 digits format
+std::string formatModeForDisplay(std::string_view mode);

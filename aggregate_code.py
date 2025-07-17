@@ -16,7 +16,7 @@ def aggregate_code(root_path, output_filename="combined_code.txt"):
         return
 
     # --- Step 2: Define target files and gather them ---
-    target_extensions = ('.cpp', '.h')
+    target_extensions = ('.cpp', '.h', '.sh')
     source_files = []
     for dirpath, _, filenames in os.walk(root_path):
         for filename in filenames:

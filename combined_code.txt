@@ -54,6 +54,8 @@ int handleCatFile(int argc, char* argv[]) {
 #include "../include/pkt_line_utils.h"
 #include "../include/packfile_utils.h"
 #include "../include/object_utils.h"
+#include "../include/checkout_utils.h" 
+#include "../include/init.h"
 
 #include <cpr/cpr.h>
 
@@ -65,19 +67,43 @@ int handleCatFile(int argc, char* argv[]) {
 
 
 int handleClone(int argc, char* argv[]){
-    std::string baseUrl;
-    std::string dir;
+     std::string baseUrl;
+    std::filesystem::path targetDir; // Utilisons std::filesystem::path, c'est mieux
 
     if (argc == 4){
         baseUrl = argv[2];
-        dir = argv[3];
+        targetDir = argv[3];
     }
     else if (argc == 3){
         baseUrl = argv[2];
-        dir = ".";
+        // Extraire le nom du repo de l'URL pour le répertoire de destination
+        std::string repoName = baseUrl.substr(baseUrl.find_last_of('/') + 1);
+        if (repoName.size() > 4 && repoName.substr(repoName.size() - 4) == ".git") {
+            repoName = repoName.substr(0, repoName.size() - 4);
+        }
+        targetDir = repoName;
     }
     else{
-        std::cerr << "Usage: mygit clone <git-address> [<some-directory>]\n";
+        std::cerr << "Usage: mygit clone <git-address> [<directory>]\n";
+        return EXIT_FAILURE;
+    }
+
+    // Créer le répertoire de destination
+    if (std::filesystem::exists(targetDir)) {
+        if (!std::filesystem::is_directory(targetDir) || !std::filesystem::is_empty(targetDir)) {
+            std::cerr << "Fatal: destination path '" << targetDir.string() << "' already exists and is not an empty directory.\n";
+            return EXIT_FAILURE;
+        }
+    } else {
+        std::filesystem::create_directory(targetDir);
+    }
+
+    // Changer le répertoire de travail pour que .git/ soit créé au bon endroit
+    std::filesystem::current_path(targetDir);
+
+    // Initialiser le dépôt local (.git/objects, .git/refs, etc.)
+    if (handleInit() != EXIT_SUCCESS) {
+        std::cerr << "Fatal: failed to initialize repository in " << targetDir << "\n";
         return EXIT_FAILURE;
     }
 
@@ -228,14 +254,29 @@ int handleClone(int argc, char* argv[]){
     std::cout << written_count << " objets écrits avec succès dans le répertoire .git/objects.\n";
 
     // ÉTAPE 7 : METTRE À JOUR HEAD (et autres refs)
-    // C'est la prochaine étape logique : il faut créer .git/HEAD pour qu'il pointe
-    // vers la branche principale (ex: "ref: refs/heads/main")
-    // et créer .git/refs/heads/main contenant le SHA du commit.
-    std::cout << "\nÉtape 7 : Mise à jour de HEAD...\n";
-    // ... (Code à implémenter pour la gestion des références)
-    // ...
+    std::cout << "\nÉtape 7 : Mise à jour des références...\n";
+    try {
+        std::filesystem::path mainRefPath = std::filesystem::path(".git") / "refs" / "heads" / "main";
+        std::filesystem::create_directories(mainRefPath.parent_path());
+        std::ofstream mainRefFile(mainRefPath);
+        mainRefFile << *sha1HexMain << "\n";
 
-    std::cout << "\nClone terminé avec succès.\n";
+        std::ofstream headFile(std::filesystem::path(".git") / "HEAD");
+        headFile << "ref: refs/heads/main\n";
+        std::cout << "HEAD est maintenant sur 'main' (" << *sha1HexMain << ")\n";
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal: failed to update refs: " << e.what() << "\n";
+        return EXIT_FAILURE;
+    }
+
+    // NOUVELLE ÉTAPE 8 : CHECKOUT DES FICHIERS DANS LE RÉPERTOIRE DE TRAVAIL
+    std::cout << "\nÉtape 8 : Checkout des fichiers...\n";
+    if (!checkoutCommit(*sha1HexMain, ".")) { // "." car on a déjà changé de répertoire
+        std::cerr << "Fatal: Failed to checkout files from the main branch.\n";
+        return EXIT_FAILURE;
+    }
+    
+    std::cout << "\nClone terminé avec succès dans '" << targetDir.string() << "'.\n";
     return EXIT_SUCCESS;
 }
 
@@ -476,9 +517,8 @@ int handleLsTree(int argc, char* argv[]) {
         if (nameOnly) {
             std::cout << entry.filename << "\n";
         } else {
-            // Now the compiler knows what constants::MODE_TREE is
             const std::string type = (entry.mode == constants::MODE_TREE) ? "tree" : "blob";
-            std::cout << entry.mode << " " << type << " " << bytesToHex(entry.sha1Bytes) << "\t" << entry.filename << "\n";
+            std::cout <<  formatModeForDisplay(entry.mode)  << " " << type << " " << bytesToHex(entry.sha1Bytes) << "\t" << entry.filename << "\n";
         }
     }
 
@@ -577,6 +617,19 @@ int handleWriteTree(int argc, char* argv[]) {
 int handleCatFile(int argc, char* argv[]);
 
 // =================================================================
+// File: src/include/checkout_utils.h
+// =================================================================
+
+#pragma once
+
+#include <string>
+#include <filesystem>
+
+// Performs a checkout of a commit into a specified directory.
+// Reads the commit, finds the root tree, and recursively checks out its contents.
+bool checkoutCommit(const std::string& commitSha, const std::filesystem::path& targetDir);
+
+// =================================================================
 // File: src/include/clone.h
 // =================================================================
 
@@ -611,7 +664,7 @@ namespace constants {
     constexpr std::string_view HEAD_FILE_NAME = "HEAD";
     
     constexpr std::string_view MODE_BLOB = "100644";
-    constexpr std::string_view MODE_TREE = "040000";
+    constexpr std::string_view MODE_TREE = "40000";
 
     constexpr std::string_view AUTHOR_NAME = "Mathis-L";
     constexpr std::string_view AUTHOR_EMAIL = "mathislafon@gmail.com";
@@ -680,6 +733,10 @@ std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> 
 
 // Helper to find the first null separator in a byte span
 std::span<const std::byte>::iterator findNullSeparator(std::span<const std::byte> data);
+
+// Formats the file mode for display, matching 'git ls-tree' output. 
+// 6 digits format
+std::string formatModeForDisplay(std::string_view mode);
 
 // =================================================================
 // File: src/include/packfile_utils.h
@@ -917,6 +974,143 @@ int main(int argc, char* argv[]) {
 
 
 // =================================================================
+// File: src/utils/checkout_utils.cpp
+// =================================================================
+
+#include "../include/checkout_utils.h"
+#include "../include/object_utils.h"
+#include "../include/tree_parser.h"
+#include "../include/sha1_utils.h"
+#include "../include/constants.h"
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <optional>
+#include <regex>
+#include <iterator>
+
+// Helper pour l'indentation des logs, pour mieux visualiser la récursion
+static std::string log_prefix(int depth) {
+    return std::string(depth * 2, ' ');
+}
+
+// Déclaration anticipée pour que checkoutCommit puisse l'appeler
+static bool checkoutTree(const std::string& treeSha, const std::filesystem::path& currentPath, int depth);
+
+// Fonction principale
+bool checkoutCommit(const std::string& commitSha, const std::filesystem::path& targetDir) {
+    std::cout << "[LOG] Starting checkout for commit " << commitSha << " into '" << targetDir.string() << "'\n";
+    
+    // 1. Lire l'objet commit
+    auto commitDataOpt = readGitObject(commitSha);
+    if (!commitDataOpt) {
+        std::cerr << "[ERROR] Fatal: Could not read commit object " << commitSha << "\n";
+        return false;
+    }
+
+    // 2. Parser le contenu pour trouver le SHA de l'arbre racine
+    std::string commitContent(reinterpret_cast<const char*>(commitDataOpt->data()), commitDataOpt->size());
+    std::smatch match;
+    std::regex treeRegex(R"(tree ([0-9a-fA-F]{40}))");
+    if (!std::regex_search(commitContent, match, treeRegex) || match.size() < 2) {
+        std::cerr << "[ERROR] Fatal: Could not find tree SHA in commit " << commitSha << "\n";
+        return false;
+    }
+    std::string rootTreeSha = match[1].str();
+    std::cout << "[LOG] Found root tree " << rootTreeSha << "\n";
+
+    // 3. Lancer le checkout récursif depuis la racine
+    return checkoutTree(rootTreeSha, targetDir, 0); // Commence à la profondeur 0
+}
+
+
+// Fonction d'aide récursive avec profondeur pour les logs
+static bool checkoutTree(const std::string& treeSha, const std::filesystem::path& currentPath, int depth) {
+    std::string prefix = log_prefix(depth);
+    std::cout << prefix << "[LOG] Processing TREE " << treeSha << " into path '" << currentPath.string() << "'\n";
+
+    // a. Lire et parser l'objet arbre
+    auto treeObjectDataOpt = readGitObject(treeSha);
+    if (!treeObjectDataOpt) {
+        std::cerr << prefix << "[ERROR] Could not read tree object " << treeSha << "\n";
+        return false;
+    }
+    
+    std::span<const std::byte> treeSpan(*treeObjectDataOpt);
+    auto nullPosIt = findNullSeparator(treeSpan);
+    if (nullPosIt == treeSpan.end()) {
+        std::cerr << prefix << "[ERROR] Invalid tree object format for " << treeSha << " (no header found)\n";
+        return false;
+    }
+
+    size_t headerSize = std::distance(treeSpan.begin(), nullPosIt) + 1;
+    auto treeContentSpan = treeSpan.subspan(headerSize);
+    auto entriesOpt = parseTreeObject(treeContentSpan);
+    if (!entriesOpt) {
+        std::cerr << prefix << "[ERROR] Could not parse tree object " << treeSha << "\n";
+        return false;
+    }
+
+    std::cout << prefix << "[LOG] Found " << entriesOpt->size() << " entries in tree " << treeSha << "\n";
+
+    // b. Itérer sur les entrées de l'arbre
+    for (const auto& entry : *entriesOpt) {
+        std::filesystem::path entryPath = currentPath / entry.filename;
+        std::string entrySha = bytesToHex(entry.sha1Bytes);
+        std::cout << prefix << "  -> Entry: " << entry.filename 
+                  << " (mode: " << entry.mode 
+                  << ", sha: " << entrySha << ")\n";
+
+        if (entry.mode == constants::MODE_TREE) {
+            std::cout << prefix << "     Action: Creating directory and recursing...\n";
+            try {
+                std::filesystem::create_directory(entryPath);
+            } catch (const std::filesystem::filesystem_error& e) {
+                std::cerr << prefix << "     [ERROR] Failed to create directory '" << entryPath.string() << "': " << e.what() << "\n";
+                return false;
+            }
+            // Appel récursif avec une profondeur augmentée
+            if (!checkoutTree(entrySha, entryPath, depth + 1)) {
+                return false; // Propager l'échec
+            }
+        } else if (entry.mode == constants::MODE_BLOB) {
+            std::cout << prefix << "     Action: Writing file...\n";
+            auto blobDataOpt = readGitObject(entrySha);
+            if (!blobDataOpt) {
+                std::cerr << prefix << "     [ERROR] Could not read blob object " << entrySha << "\n";
+                return false;
+            }
+            
+            std::span<const std::byte> blobSpan(*blobDataOpt);
+            auto blobNullPosIt = findNullSeparator(blobSpan);
+            if (blobNullPosIt == blobSpan.end()) {
+                 std::cerr << prefix << "     [ERROR] Invalid blob object format for " << entrySha << " (no header found)\n";
+                 return false;
+            }
+
+            size_t blobHeaderSize = std::distance(blobSpan.begin(), blobNullPosIt) + 1;
+            auto blobContent = blobSpan.subspan(blobHeaderSize);
+
+            try {
+                std::ofstream outFile(entryPath, std::ios::binary);
+                outFile.write(reinterpret_cast<const char*>(blobContent.data()), blobContent.size());
+                std::cout << prefix << "     Success: Wrote " << blobContent.size() << " bytes to '" << entryPath.string() << "'\n";
+            } catch (const std::exception& e) {
+                std::cerr << prefix << "     [ERROR] Failed to write file '" << entryPath.string() << "': " << e.what() << "\n";
+                return false;
+            }
+        } else {
+             std::cout << prefix << "     Action: Skipping entry with mode " << entry.mode << ".\n";
+        }
+    }
+    
+    std::cout << prefix << "[LOG] Finished processing TREE " << treeSha << "\n";
+    return true;
+}
+
+// =================================================================
 // File: src/utils/object_utils.cpp
 // =================================================================
 
@@ -1004,6 +1198,16 @@ std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> 
 
 std::span<const std::byte>::iterator findNullSeparator(std::span<const std::byte> data) {
     return std::find(data.begin(), data.end(), std::byte{0});
+}
+
+// A helper function to format a file/tree mode for user-friendly display.
+// Git's 'ls-tree' command shows modes as 6-digit numbers.
+std::string formatModeForDisplay(std::string_view mode) {
+    //a tree mode is stored as "40000" (5 digits) -> git correct format "040000"
+    if (mode.length() < 6) {
+        return "0" + std::string(mode);
+    }
+    return std::string(mode);
 }
 
 // =================================================================

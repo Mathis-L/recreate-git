@@ -56,9 +56,8 @@ int handleLsTree(int argc, char* argv[]) {
         if (nameOnly) {
             std::cout << entry.filename << "\n";
         } else {
-            // Now the compiler knows what constants::MODE_TREE is
             const std::string type = (entry.mode == constants::MODE_TREE) ? "tree" : "blob";
-            std::cout << entry.mode << " " << type << " " << bytesToHex(entry.sha1Bytes) << "\t" << entry.filename << "\n";
+            std::cout <<  formatModeForDisplay(entry.mode)  << " " << type << " " << bytesToHex(entry.sha1Bytes) << "\t" << entry.filename << "\n";
         }
     }
 
