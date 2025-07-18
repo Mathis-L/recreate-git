@@ -18,7 +18,7 @@ git add test.txt
 tree_sha_1=$(git write-tree)
 
 commit_1=$(echo "Initial commit" | git commit-tree "$tree_sha_1")
-your_commit_1=$(../../build.sh commit-tree "$tree_sha_1" -m "Initial commit" | tail -n 1)
+your_commit_1=$($MYGIT_EXEC commit-tree "$tree_sha_1" -m "Initial commit" | tail -n 1)
 
 echo -e "${CYAN}📦 Git Commit 1: $commit_1${NC}"
 echo -e "${CYAN}📦 Your Commit 1: $your_commit_1${NC}"
@@ -30,7 +30,7 @@ git add test.txt
 tree_sha_2=$(git write-tree)
 
 commit_2=$(echo "Second commit" | git commit-tree "$tree_sha_2" -p "$commit_1")
-your_commit_2=$(../../build.sh commit-tree "$tree_sha_2" -p "$your_commit_1" -m "Second commit" | tail -n 1)
+your_commit_2=$($MYGIT_EXEC commit-tree "$tree_sha_2" -p "$your_commit_1" -m "Second commit" | tail -n 1)
 
 echo -e "${CYAN}📦 Git Commit 2: $commit_2${NC}"
 echo -e "${CYAN}📦 Your Commit 2: $your_commit_2${NC}"

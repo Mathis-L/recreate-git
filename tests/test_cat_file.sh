@@ -10,9 +10,9 @@ rm -rf tmp_test && mkdir tmp_test && cd tmp_test
 
 echo "hello world" > file.txt
 
-sha=$(../../build.sh hash-object -w file.txt | tail -n 1)
+sha=$($MYGIT_EXEC hash-object -w file.txt | tail -n 1)
 expected=$(cat file.txt)
-actual=$(../../build.sh cat-file -p "$sha" | tail -n 1)
+actual=$($MYGIT_EXEC cat-file -p "$sha" | tail -n 1)
 
 if [ "$expected" == "$actual" ]; then
     echo -e "${GREEN}[PASS] cat-file displays correct content${NC}"

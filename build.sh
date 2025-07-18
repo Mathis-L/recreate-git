@@ -16,6 +16,4 @@ echo "Step 2: Building the executable..."
 cmake --build ./build
 
 echo ""
-echo "✅ Build complete!"
-echo "   The executable is located at: ./build/mygit"
-echo "   You can now run commands, for example: ./build/mygit --help"
+echo "✅ Build complete! You can now run commands, for example: ./build/mygit"

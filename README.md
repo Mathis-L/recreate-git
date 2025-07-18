@@ -20,7 +20,7 @@ $ chmod +x build.sh
 $ ./build.sh
 --- Starting mygit build process ---
 Step 1: Configuring with CMake...
--- The CXX compiler identification is GNU 11.4.0
+-- The CXX compiler identification is GNU 13.3.0
 ...
 Step 2: Building the executable...
 [ 50%] Built target mygit
@@ -49,19 +49,19 @@ Initialized empty Git repository in /path/to/my-test-project/.git/
 # Create a file and add it to the object database as a "blob"
 $ echo "hello git" > hello.txt
 $ mygit hash-object -w hello.txt
-d90f1b40cf83b5d4313c4155abdaac3265b53026
+8d0e41234f24b6da002d962a26c2495ea16a425f
 
 # Create a "tree" object that captures the state of the directory
 $ mygit write-tree
-7c7394336c9966133c945b63cf476902d28f0b9f
+07ed5a7aebb914e3a02edf6d622b82d364037e3c
 
 # Create a "commit" object, linking the tree with a message
-$ mygit commit-tree 7c7394336c9966133c945b63cf476902d28f0b9f -m "Initial commit"
-1b2e67a423e8b0ed5d46924d567027582b12367d
+$ mygit commit-tree 07ed5a7aebb914e3a02edf6d622b82d364037e3c -m "Initial commit"
+2103525aff710463c0981ca9dc37c0ebb027335a
 
 # Inspect the final commit object we just created
-$ /mygit cat-file -p 1b2e67a423e8b0ed5d46924d567027582b12367d
-tree 7c7394336c9966133c945b63cf476902d28f0b9f
+$ mygit cat-file -p 2103525aff710463c0981ca9dc37c0ebb027335a
+tree 07ed5a7aebb914e3a02edf6d622b82d364037e3c
 author Mathis-L <mathislafon@gmail.com> 1721245200 +0000
 committer Mathis-L <mathislafon@gmail.com> 1721245200 +0000
 
@@ -116,7 +116,7 @@ You will need a C++23 compatible compiler and the following dependencies:
 On Debian/Ubuntu, you can install them with:
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential cmake libssl-dev zlib1g-dev
+sudo apt-get install -y build-essential cmake libssl-dev zlib1g-dev libcurl4-openssl-dev
 ```
 
 And for cpr you will have to do : 

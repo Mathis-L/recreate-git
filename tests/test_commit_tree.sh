@@ -26,7 +26,7 @@ echo ""
 echo "----------------------------------------"
 echo ""
 
-actual_commit_sha=$(../../build.sh commit-tree "$tree_sha" -m "Initial commit" | tail -n 1)
+actual_commit_sha=$($MYGIT_EXEC commit-tree "$tree_sha" -m "Initial commit" | tail -n 1)
 echo -e "${CYAN}📦 Your commit SHA: $actual_commit_sha${NC}"
 echo -e "${CYAN}📄 Your commit content:${NC}"
 git cat-file -p "$actual_commit_sha"
