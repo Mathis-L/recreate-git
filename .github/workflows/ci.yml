@@ -1,0 +1,63 @@
+# .github/workflows/ci.yml
+
+# 1. Workflow Name: Give a name to your workflow.
+name: C++ CI for mygit
+
+# 2. Triggers: Define when the workflow should run.
+on:
+  # Run on every push to the 'main' or 'master' branch.
+  push:
+    branches: [ "main", "master" ]
+  # Run on every pull request targeting the 'main' or 'master' branch.
+  pull_request:
+    branches: [ "main", "master" ]
+
+# 3. Jobs: Define a sequence of tasks to be executed.
+jobs:
+  # We will have a single job called 'build-and-test'.
+  build-and-test:
+    # 4. Runner: Specify the type of machine to run the job on.
+    # We use the latest version of Ubuntu, as your dependencies are for Debian/Ubuntu.
+    runs-on: ubuntu-latest
+
+    # 5. Steps: A sequence of tasks that make up the job.
+    steps:
+      # Step 1: Check out your repository's code.
+      # This downloads your code into the runner.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Install system dependencies using apt-get.
+      # This corresponds to the 'Prerequisites' section of your README.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev zlib1g-dev libcurl4-openssl-dev
+
+      # Step 3: Install the 'cpr' library from source.
+      # This automates the manual installation steps from your README.
+      - name: Install cpr library
+        run: |
+          git clone https://github.com/libcpr/cpr.git
+          cd cpr
+          mkdir build && cd build
+          cmake .. -DCPR_USE_SYSTEM_CURL=ON
+          cmake --build .
+          sudo cmake --install .
+
+      # Step 4: Make build and test scripts executable.
+      # This is equivalent to running 'chmod +x'.
+      - name: Make scripts executable
+        run: |
+          chmod +x build.sh
+          chmod +x tests/*.sh
+
+      # Step 5: Build the 'mygit' executable.
+      # This runs your existing build script.
+      - name: Build the project
+        run: ./build.sh
+
+      # Step 6: Run the integration tests.
+      # This runs your existing test suite to validate the build.
+      - name: Run tests
+        run: ./tests/run_all_tests.sh
