@@ -12,8 +12,9 @@ std::optional<std::vector<std::byte>> readGitObject(const std::string& sha1Hex) 
     if (sha1Hex.length() != 40) {
         return std::nullopt;
     }
+    
+    // Construct path from SHA: e.g., "ff/123..." for SHA "ff123...".
     const auto objectPath = constants::OBJECTS_DIR / sha1Hex.substr(0, 2) / sha1Hex.substr(2);
-
     if (!std::filesystem::exists(objectPath)) {
         return std::nullopt;
     }
@@ -23,7 +24,7 @@ std::optional<std::vector<std::byte>> readGitObject(const std::string& sha1Hex) 
         return std::nullopt;
     }
 
-    // Read entire file into a buffer
+    // Read the entire compressed file into a buffer.
     objectFile.seekg(0, std::ios::end);
     std::streamsize size = objectFile.tellg();
     objectFile.seekg(0, std::ios::beg);
@@ -33,6 +34,7 @@ std::optional<std::vector<std::byte>> readGitObject(const std::string& sha1Hex) 
         return std::nullopt;
     }
 
+    // Decompress the data using zlib.
     std::vector<std::byte> decompressedData;
     if (!decompressZlib(compressedData, decompressedData)) {
         return std::nullopt;
@@ -41,30 +43,29 @@ std::optional<std::vector<std::byte>> readGitObject(const std::string& sha1Hex) 
     return decompressedData;
 }
 
-std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> content) {
-    // 1. Compute SHA-1
-    std::vector<std::byte> sha1Bytes = calculateSha1(content);
 
-    // 2. Convert the raw hash to hex *only* for creating the file path.
+std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> content) {
+    // 1. Calculate the object's SHA-1 hash from its full content.
+    std::vector<std::byte> sha1Bytes = calculateSha1(content);
     std::string sha1Hex = bytesToHex(sha1Bytes);
 
-    // 3. Prepare object path
+    // 2. Determine the path for the object file.
     const auto dir = constants::OBJECTS_DIR / sha1Hex.substr(0, 2);
     const auto filePath = dir / sha1Hex.substr(2);
 
-    // Don't rewrite if it already exists
+    // Optimization: if the object already exists, do nothing.
     if (std::filesystem::exists(filePath)) {
         return sha1Bytes;
     }
 
-    // 3. Compress object data
+    // 3. Compress the content using zlib.
     std::vector<std::byte> compressedData;
     if (!compressZlib(content, compressedData)) {
         std::cerr << "Compression failed\n";
         return std::nullopt;
     }
     
-    // 4. Write compressed object to disk
+    // 4. Write the compressed data to disk.
     try {
         std::filesystem::create_directories(dir);
         std::ofstream outFile(filePath, std::ios::binary | std::ios::trunc);
@@ -77,17 +78,17 @@ std::optional<std::vector<std::byte>> writeGitObject(std::span<const std::byte> 
         return std::nullopt;
     }
 
+    // Return the raw SHA-1 hash on success.
     return sha1Bytes;
 }
 
+// Finds the first null byte, which separates the header from the content.
 std::span<const std::byte>::iterator findNullSeparator(std::span<const std::byte> data) {
     return std::find(data.begin(), data.end(), std::byte{0});
 }
 
-// A helper function to format a file/tree mode for user-friendly display.
-// Git's 'ls-tree' command shows modes as 6-digit numbers.
+// Pads the mode to 6 digits for display, e.g., "40000" -> "040000".
 std::string formatModeForDisplay(std::string_view mode) {
-    //a tree mode is stored as "40000" (5 digits) -> git correct format "040000"
     if (mode.length() < 6) {
         return "0" + std::string(mode);
     }

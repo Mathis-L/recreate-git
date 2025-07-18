@@ -7,6 +7,7 @@
 #include <optional>
 
 int handleCatFile(int argc, char* argv[]) {
+    // This implementation only supports the '-p' (pretty-print) option.
     if (argc != 4 || std::string(argv[2]) != "-p") {
         std::cerr << "Usage: mygit cat-file -p <blob-sha>\n";
         return EXIT_FAILURE;
@@ -20,6 +21,7 @@ int handleCatFile(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     
+    // Use a span for safe, non-owning access to the decompressed data.
     const auto& decompressedDataVec = *decompressedDataOpt;
     std::span<const std::byte> dataSpan(decompressedDataVec);
     auto nullPosIt = findNullSeparator(dataSpan);
@@ -29,11 +31,10 @@ int handleCatFile(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // The content is everything after the null byte.
-    // We write it directly to stdout's buffer to handle binary data correctly.
+    // The actual content of the object starts after the first null byte.
     const char* contentStart = reinterpret_cast<const char*>(&*(nullPosIt + 1));
     
-    // We can get the size by creating a subspan
+    // Calculate the start and size of the content.
     auto contentSpan = dataSpan.subspan(std::distance(dataSpan.begin(), nullPosIt) + 1);
     const size_t contentSize = contentSpan.size();
 

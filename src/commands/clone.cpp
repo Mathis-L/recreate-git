@@ -5,7 +5,7 @@
 #include "../include/checkout_utils.h" 
 #include "../include/init.h"
 
-#include <cpr/cpr.h>
+#include <cpr/cpr.h>  // Using a library for HTTP requests simplifies the logic.
 
 #include <iostream>
 #include <string> 
@@ -16,27 +16,26 @@
 
 int handleClone(int argc, char* argv[]){
      std::string baseUrl;
-    std::filesystem::path targetDir; // Utilisons std::filesystem::path, c'est mieux
+    std::filesystem::path targetDir; 
 
-    if (argc == 4){
+    // --- 1. Argument Parsing ---
+    if (argc == 3) { // mygit clone <url>
         baseUrl = argv[2];
-        targetDir = argv[3];
-    }
-    else if (argc == 3){
-        baseUrl = argv[2];
-        // Extraire le nom du repo de l'URL pour le répertoire de destination
+        // Infer directory name from URL, e.g., https://github.com/user/repo.git -> repo
         std::string repoName = baseUrl.substr(baseUrl.find_last_of('/') + 1);
-        if (repoName.size() > 4 && repoName.substr(repoName.size() - 4) == ".git") {
-            repoName = repoName.substr(0, repoName.size() - 4);
+        if (repoName.ends_with(".git")) {
+            repoName.resize(repoName.size() - 4);
         }
         targetDir = repoName;
-    }
-    else{
-        std::cerr << "Usage: mygit clone <git-address> [<directory>]\n";
+    } else if (argc == 4) { // mygit clone <url> <dir>
+        baseUrl = argv[2];
+        targetDir = argv[3];
+    } else {
+        std::cerr << "Usage: mygit clone <url> [<directory>]\n";
         return EXIT_FAILURE;
     }
 
-    // Créer le répertoire de destination
+    // --- 2. Local Repository Setup ---
     if (std::filesystem::exists(targetDir)) {
         if (!std::filesystem::is_directory(targetDir) || !std::filesystem::is_empty(targetDir)) {
             std::cerr << "Fatal: destination path '" << targetDir.string() << "' already exists and is not an empty directory.\n";
@@ -46,163 +45,96 @@ int handleClone(int argc, char* argv[]){
         std::filesystem::create_directory(targetDir);
     }
 
-    // Changer le répertoire de travail pour que .git/ soit créé au bon endroit
+    // Change working directory so that .git/ and checked-out files are created in the right place.
     std::filesystem::current_path(targetDir);
-
-    // Initialiser le dépôt local (.git/objects, .git/refs, etc.)
-    if (handleInit() != EXIT_SUCCESS) {
+    if (handleInit() != EXIT_SUCCESS) {  // Initialize a blank .git directory.
         std::cerr << "Fatal: failed to initialize repository in " << targetDir << "\n";
         return EXIT_FAILURE;
     }
 
-    //  URL must end with .git
-    if (baseUrl.rfind(".git") == std::string::npos) {
-        baseUrl += ".git";
-    }
-    // no slash at the end
-    if (baseUrl.back() == '/') {
-        baseUrl.pop_back();
-    }
+    // Normalize URL for Git HTTP protocol.
+    if (!baseUrl.ends_with(".git")) baseUrl += ".git";
+    if (baseUrl.back() == '/') baseUrl.pop_back();
 
-    //1. GET REF DISCOVERY
-    std::cout << "baseUrl: " << baseUrl << "\n";
+    // --- 3. Ref Discovery (Smart HTTP) ---
+    // First, ask the server what refs (branches, tags) it has.
     std::string discoveryUrl = baseUrl + "/info/refs?service=git-upload-pack";
-
     cpr::Response discoveryResp = cpr::Get(cpr::Url{discoveryUrl});
 
-    std::cout << "Status: " << discoveryResp.status_code << "\n";
     if (discoveryResp.status_code != 200) {
-        std::cerr << "Error: Failed to fetch refs.\n";
-        std::cerr << "Status: " << discoveryResp.status_code << "\n";
-        std::cerr << "Body:\n" << discoveryResp.text << std::endl;
+        std::cerr << "Error: Failed to fetch refs. Status: " << discoveryResp.status_code << "\n"
+                  << "Body:\n" << discoveryResp.text << std::endl;
         return EXIT_FAILURE;
     }
 
-    //2. FIND MAIN BRANCH SHA
+     // From the response, find the SHA of the main branch (master or main).
     auto sha1HexMain = findMainBranchSha1(discoveryResp.text);
-
     if (!sha1HexMain) {
         std::cerr << "Couldn't find the main Sha1 \n" ;
         return EXIT_FAILURE;
     }
 
-    //3. POST REQUEST : ASK FOR PACKFILE
+    // --- 4. Negotiate for Packfile (Smart HTTP) ---
+    // Send a request specifying which commit we "want". The server will generate a packfile.E
     std::stringstream requestBodyStream;
-
-    // first line we want : <size>want <sha1-du-commit-main> side-band-64k\n
     std::string wantLine = "want " + *sha1HexMain + " multi_ack_detailed no-done side-band-64k agent=mygit/0.1\n";
-
     requestBodyStream << createPktLine(wantLine);
-    requestBodyStream << createPktLine(""); // Le "flush-pkt"
-    requestBodyStream << createPktLine("done\n");
+    requestBodyStream << createPktLine("");       // Flush packet
+    requestBodyStream << createPktLine("done\n"); // We are done specifying what we want.
 
-    std::string postReq = requestBodyStream.str();
-    std::cout << "postReq sent: " << postReq << std::endl;
-
-    cpr::Session session;
-    std::string postUrl = baseUrl + "/git-upload-pack";
-    session.SetUrl(cpr::Url{postUrl});
-
-    // header
-    session.SetHeader({
-        {"Content-Type", "application/x-git-upload-pack-request"},
-        {"Accept", "application/x-git-upload-pack-result"}
-    });
-
-    session.SetBody(cpr::Body{postReq});
-    cpr::Response bodyResp = session.Post();
+     cpr::Response bodyResp = cpr::Post(cpr::Url{baseUrl + "/git-upload-pack"},
+                                       cpr::Header{{"Content-Type", "application/x-git-upload-pack-request"},
+                                                   {"Accept", "application/x-git-upload-pack-result"}},
+                                       cpr::Body{requestBodyStream.str()});
 
     if (bodyResp.status_code != 200) {
-        std::cerr << "Error during POST request.\n";
-        std::cerr << "Status code: " << bodyResp.status_code << "\n";
-        std::cerr << "Error message: " << bodyResp.error.message << "\n";
-        std::cerr << "Server response: " << bodyResp.text << "\n";
+        std::cerr << "Error during POST request. Status: " << bodyResp.status_code << "\n";
         return EXIT_FAILURE;
     }
 
-    //4. RECEIVE AND DEMULTIPLEX THE RESPONSE
-    const std::string& raw_response = bodyResp.text;
-
-    auto packfile_opt = readPackFile(raw_response);
-
-    if (!packfile_opt){
-        std::cerr << "Couldn't read the packfile \n";
+    // --- 5. Process Packfile ---
+    // The server's response is multiplexed. We need to extract the raw packfile data.
+    auto packfile_opt = extractPackfileData(bodyResp.text);
+    if (!packfile_opt) {
+        std::cerr << "Couldn't read the packfile from the server response.\n";
         return EXIT_FAILURE;
     }
-    std::cout << "SUCCESS READING PACKFILE\n";
 
-
-    // 5. PARSE THE PACKFILE DATA
-    std::cout << "\nStarting packfile analysis...\n";
-
-    // Crée une instance de l'analyseur avec les données du packfile.
-    std::vector<std::byte> packfile = *packfile_opt;
+    // Parse the packfile to get individual objects, resolving any deltas.
+    std::vector<std::byte>& packfile = *packfile_opt;
     PackfileParser parser(packfile);
-    
-    // Lance l'analyse. Cette méthode peut lancer une exception si le packfile est corrompu.
     auto objects_opt = parser.parseAndResolve();
-
     if (!objects_opt){
         std::cerr << "Couldn't parse the packfile \n";
         return EXIT_FAILURE;
     }
 
     std::vector<PackObjectInfo> objects = *objects_opt;
-
     std::cout << "Analysis complete. Found " << objects.size() << " objects.\n";
-    std::cout << "--- Simulating 'git verify-pack -v' output ---\n";
 
-    // Affiche les informations de chaque objet, dans le format souhaité.
-    for (const auto& obj : objects) {
-        std::cout << obj.sha1 << " "
-                    << typeToStringMap.at(obj.type) << " "
-                    << obj.uncompressed_size << " "
-                    << obj.size_in_packfile << " "
-                    << obj.offset_in_packfile;
-        if(!obj.delta_ref.empty()){
-            // Pour les deltas, on affiche la profondeur (simplifiée à 1) et la référence de base.
-            std::cout << " 1 " << obj.delta_ref;
-        }
-        std::cout << std::endl;
-    }
-     // NOUVELLE ÉTAPE 6 : ÉCRIRE LES OBJETS DANS LA BASE DE DONNÉES LOCALE
-    std::cout << "\nÉtape 6 : Écriture des objets dans .git/objects...\n";
-    
-    // On récupère les données brutes des objets résolus depuis le parser
+    // --- 6. Write Objects to Local Database ---
+    // Take the resolved objects from the packfile and write them into the .git/objects directory.
     const auto& resolved_data_map = parser.getResolvedObjectsData();
     int written_count = 0;
-    
     for (const auto& obj_info : objects) {
-        // On reconstruit le contenu complet de l'objet (en-tête + données)
-        // C'est ce contenu qui est hashé et compressé par Git.
-        
-        // a. Récupérer les données brutes de l'objet via son SHA
         const auto& data = resolved_data_map.at(obj_info.sha1);
-        
-        // b. Construire l'en-tête Git ("<type> <taille>\0")
         std::string header_str = typeToStringMap.at(obj_info.type) + " " + std::to_string(data.size()) + '\0';
 
-        // c. Concaténer l'en-tête et les données
         std::vector<std::byte> full_object_content;
-        full_object_content.reserve(header_str.size() + data.size());
-        std::transform(header_str.begin(), header_str.end(), std::back_inserter(full_object_content), 
-                        [](char c){ return static_cast<std::byte>(c); });
+        auto headerBytes = std::as_bytes(std::span{header_str});
+        full_object_content.insert(full_object_content.end(), headerBytes.begin(), headerBytes.end());
         full_object_content.insert(full_object_content.end(), data.begin(), data.end());
 
-        // d. Appeler ta fonction pour écrire l'objet sur le disque
-        if (writeGitObject(full_object_content)) {
-            written_count++;
-        } else {
-            std::cerr << "Erreur critique : impossible d'écrire l'objet " << obj_info.sha1 << " sur le disque.\n";
-            // On pourrait décider de s'arrêter ici ou de continuer
+        if (!writeGitObject(full_object_content)) {
+            std::cerr << "Critical error: failed to write object " << obj_info.sha1 << " to disk.\n";
             return EXIT_FAILURE;
         }
+        written_count++;
     }
-    
-    std::cout << written_count << " objets écrits avec succès dans le répertoire .git/objects.\n";
+    std::cout << written_count << " objects successfully written to .git/objects.\n";
 
-    // ÉTAPE 7 : METTRE À JOUR HEAD (et autres refs)
-    std::cout << "\nÉtape 7 : Mise à jour des références...\n";
+    // --- 7. Update Local References ---
+    // Point the local 'main' branch and HEAD to the commit we just fetched.
     try {
         std::filesystem::path mainRefPath = std::filesystem::path(".git") / "refs" / "heads" / "main";
         std::filesystem::create_directories(mainRefPath.parent_path());
@@ -211,21 +143,20 @@ int handleClone(int argc, char* argv[]){
 
         std::ofstream headFile(std::filesystem::path(".git") / "HEAD");
         headFile << "ref: refs/heads/main\n";
-        std::cout << "HEAD est maintenant sur 'main' (" << *sha1HexMain << ")\n";
+        std::cout << "HEAD is now at " << sha1HexMain->substr(0, 7) << " (main)\n";
     } catch (const std::exception& e) {
         std::cerr << "Fatal: failed to update refs: " << e.what() << "\n";
         return EXIT_FAILURE;
     }
 
-    // NOUVELLE ÉTAPE 8 : CHECKOUT DES FICHIERS DANS LE RÉPERTOIRE DE TRAVAIL
-    std::cout << "\nÉtape 8 : Checkout des fichiers...\n";
-    if (!checkoutCommit(*sha1HexMain, ".")) { // "." car on a déjà changé de répertoire
+    // --- 8. Checkout Files ---
+    // Populate the working directory with the files from the main branch commit.
+    std::cout << "Checking out files from main branch...\n";
+    if (!checkoutCommit(*sha1HexMain, ".")) { // "." is the current directory.
         std::cerr << "Fatal: Failed to checkout files from the main branch.\n";
         return EXIT_FAILURE;
     }
     
-    std::cout << "\nClone terminé avec succès dans '" << targetDir.string() << "'.\n";
+    std::cout << "\nSuccessfully cloned into '" << targetDir.string() << "'.\n";
     return EXIT_SUCCESS;
 }
-
-

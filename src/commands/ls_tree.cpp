@@ -32,20 +32,17 @@ int handleLsTree(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // *** FIX #1: Create a span and work consistently with it ***
+    // Isolate the tree's content (after the "tree <size>\0" header).
     const auto& decompressedDataVec = *decompressedDataOpt;
     std::span<const std::byte> dataSpan(decompressedDataVec);
-
     auto nullPosIt = findNullSeparator(dataSpan);
-    if (nullPosIt == dataSpan.end()) { // Compare span::iterator to span::iterator
+    if (nullPosIt == dataSpan.end()) {
         std::cerr << "Invalid tree object: missing header\n";
         return EXIT_FAILURE;
     }
-
-    // The tree content is everything *after* the null byte separator.
-    // Use the span's subspan feature for a clean, safe way to get the content view.
     auto treeContent = dataSpan.subspan(std::distance(dataSpan.begin(), nullPosIt) + 1);
 
+    // Use a dedicated parser to extract entries from the binary tree format.
     auto entriesOpt = parseTreeObject(treeContent);
     if (!entriesOpt) {
         std::cerr << "Failed to parse tree object\n";

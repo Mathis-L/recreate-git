@@ -11,23 +11,23 @@
 #include <algorithm>
 
 
-// Its job is to prepare a blob and write it, returning its bytes SHA.
+// Internal implementation for creating and writing a blob object.
 std::optional<std::vector<std::byte>> createBlobAndGetRawSha(const std::filesystem::path& filePath) {
     std::ifstream inFile(filePath, std::ios::binary);
     if (!inFile) {
-        return std::nullopt; // Caller will handle the error message
+        return std::nullopt; 
     }
 
-     // 1. Read the raw characters from the file into a temporary vector of char.
+    // Read file content into a buffer.
     const std::vector<char> fileContent(
         (std::istreambuf_iterator<char>(inFile)),
         std::istreambuf_iterator<char>()
     );
 
-    // 2. Prepare the Git object header.
+    // Prepare the Git object header: "blob <size>\0".
     std::string header = "blob " + std::to_string(fileContent.size()) + '\0';
     
-    // 3. Construct the final blob content vector of bytes.
+    // Construct the full object content (header + data) as a byte vector.
     std::vector<std::byte> blobContent;
     blobContent.reserve(header.length() + fileContent.size());
 
@@ -41,10 +41,11 @@ std::optional<std::vector<std::byte>> createBlobAndGetRawSha(const std::filesyst
                     reinterpret_cast<const std::byte*>(fileContent.data()), 
                     reinterpret_cast<const std::byte*>(fileContent.data()) + fileContent.size());
 
-    // 4. Write the final object and return its SHA.
+    // The writeGitObject function handles hashing, compression, and writing to disk.
     return writeGitObject(blobContent);
 }
 
+// Command handler for `mygit hash-object -w <file>`.
 int handleHashObject(int argc, char* argv[]) {
     if (argc != 4 || std::string(argv[2]) != "-w") {
         std::cerr << "Usage: mygit hash-object -w <file-path>\n";

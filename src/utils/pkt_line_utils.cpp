@@ -17,7 +17,7 @@ std::optional<std::vector<std::byte>> PktLineReader::readNextPacket(){
     char length_hex[4];
     m_stream.read(length_hex, 4);
 
-// check if we read 4 characters with read()
+    // check if we read 4 characters with read()
     if(m_stream.gcount() < 4){
         m_is_finished = true;
         return std::nullopt;
@@ -67,7 +67,6 @@ std::optional<std::string> findMainBranchSha1(const std::string& str){
         std::vector<std::byte>& packet_data = *packet_opt;
 
         std::string packet_line(reinterpret_cast<const char*>(packet_data.data()), packet_data.size());
-        std::cout << "packet_line : " << packet_line << "\n";
 
         if (!packet_line.empty() && packet_line.back() == '\n') {
             packet_line.pop_back();
@@ -101,7 +100,7 @@ std::string createPktLine(const std::string& line) {
 }
 
 
-std::optional<std::vector<std::byte>> readPackFile(const std::string& str){
+std::optional<std::vector<std::byte>> extractPackfileData(const std::string& str){
     std::istringstream data_stream(str);
     PktLineReader pktLineReader(data_stream);
 

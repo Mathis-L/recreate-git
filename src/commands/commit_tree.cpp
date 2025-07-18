@@ -9,18 +9,18 @@
 #include <algorithm>
 
 int handleCommitTree(int argc, char* argv[]){
-    bool firstCommit = false;
+    // This command takes a tree SHA, an optional parent commit, and a message.
     std::string treeSha;
     std::string commitMessage;
-    std::string previousCommitSha;
+    std::string parentCommitSha; // Can be empty.
 
+    // Argument parsing for the two supported forms.
     if (argc == 5 && std::string(argv[3]) == "-m") {
-        firstCommit = true;
         treeSha = argv[2];
         commitMessage = argv[4];
     } else if (argc == 7 && std::string(argv[3]) == "-p" && std::string(argv[5]) == "-m") {
         treeSha = argv[2];
-        previousCommitSha = argv[4];
+        parentCommitSha = argv[4];
         commitMessage = argv[6];
 
     } else {
@@ -28,30 +28,28 @@ int handleCommitTree(int argc, char* argv[]){
         return EXIT_FAILURE;
     }
 
+    // Assemble the commit object's content.
     std::ostringstream commitDataStream;
-    
     commitDataStream << "tree " << treeSha << "\n";
-
-    if (!firstCommit) {
-        commitDataStream << "parent " << previousCommitSha << "\n";
+    if (!parentCommitSha.empty()) {
+        commitDataStream << "parent " << parentCommitSha << "\n";
     }
 
+    // For this implementation, author/committer info is hardcoded.
+    // A full implementation would read this from Git config.
     const std::string timestamp = getGitTimestamp();
-    
-    // For now hardcoded 
     commitDataStream << "author " << constants::AUTHOR_NAME << " <" << constants::AUTHOR_EMAIL << "> " << timestamp << "\n";
     commitDataStream << "committer " << constants::AUTHOR_NAME << " <" << constants::AUTHOR_EMAIL << "> " << timestamp << "\n";
-    
     commitDataStream << "\n" << commitMessage << "\n";
 
     std::string commitContentStr = commitDataStream.str();
     
+    // Prepend the Git object header ("commit <size>\0").
     std::string header = "commit " + std::to_string(commitContentStr.size()) + '\0';
     std::string fullCommitObjectStr = header + commitContentStr;
 
-    std::span<const std::byte> fullCommitObjectBytes = std::as_bytes(std::span{fullCommitObjectStr});
-
-    auto sha1BytesOpt = writeGitObject(fullCommitObjectBytes);
+    // Write the complete object to the database and print its SHA.
+    auto sha1BytesOpt = writeGitObject(std::as_bytes(std::span{fullCommitObjectStr}));
     if (sha1BytesOpt) {
         std::cout << bytesToHex(*sha1BytesOpt) << "\n";
     } else {

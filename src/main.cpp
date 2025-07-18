@@ -14,35 +14,45 @@
 #include "include/commit_tree.h"
 #include "include/clone.h"
 
-
+/**
+ * @brief Main entry point for the mygit application.
+ * 
+ * This function acts as a command dispatcher, parsing the first argument
+ * to determine which Git command to execute and forwarding the arguments
+ * to the appropriate handler.
+ */
 int main(int argc, char* argv[]) {
-    // Flush after every std::cout / std::cerr
+    // Ensure that cout/cerr flush immediately. This is crucial for debugging
+    // and for predictable output when the program is used in scripts.
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    std::cerr << "Logs from your program will appear here!\n";
-
-    // Uncomment this block to pass the first stage
     if (argc < 2) {
-        std::cerr << "No command provided.\n";
+        std::cerr << "Usage: mygit <command> [<args>...]\n";
         return EXIT_FAILURE;
     }
 
     const std::string command = argv[1];
+
     if (command == "init") {
         return handleInit();
-    } else if (command == "hash-object") {
-        return handleHashObject(argc, argv);
-    } else if (command == "cat-file") {
+    } 
+    if (command == "cat-file") {
         return handleCatFile(argc, argv);
-    } else if (command == "ls-tree") {
+    }
+    if (command == "hash-object") {
+        return handleHashObject(argc, argv);
+    }
+    if (command == "ls-tree") {
         return handleLsTree(argc, argv);
-    } else if (command == "write-tree"){
+    }
+    if (command == "write-tree") {
         return handleWriteTree(argc, argv);
-    } else if (command == "commit-tree"){
+    }
+    if (command == "commit-tree") {
         return handleCommitTree(argc, argv);
-    } else if (command == "clone"){
+    }
+    if (command == "clone") {
         return handleClone(argc, argv);
     }
 
