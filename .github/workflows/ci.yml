@@ -43,6 +43,11 @@ jobs:
       - name: Build the project
         run: ./build.sh
 
+      - name: Configure Git for test runner
+        run: |
+          git config --global user.name "CI Test Bot"
+          git config --global user.email "ci-bot@github.com"
+
       # CORRECTED STEP: Run tests from within the 'tests' directory
       - name: Run tests
         # This tells the runner to execute the following command
