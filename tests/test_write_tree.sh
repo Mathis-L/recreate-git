@@ -14,7 +14,7 @@ echo "hello" > file.txt
 git init > /dev/null
 git add file.txt
 expected=$(git write-tree)
-actual=$(../../your_program.sh write-tree | tail -n 1)
+actual=$(../../build.sh write-tree | tail -n 1)
 
 if [ "$expected" == "$actual" ]; then
     echo -e "${GREEN}[PASS] write-tree matches Git${NC}"

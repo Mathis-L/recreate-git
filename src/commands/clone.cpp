@@ -60,7 +60,7 @@ int handleClone(int argc, char* argv[]){
     // First, ask the server what refs (branches, tags) it has.
     std::string discoveryUrl = baseUrl + "/info/refs?service=git-upload-pack";
     cpr::Response discoveryResp = cpr::Get(cpr::Url{discoveryUrl});
-
+    
     if (discoveryResp.status_code != 200) {
         std::cerr << "Error: Failed to fetch refs. Status: " << discoveryResp.status_code << "\n"
                   << "Body:\n" << discoveryResp.text << std::endl;

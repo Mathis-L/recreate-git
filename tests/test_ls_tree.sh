@@ -17,10 +17,10 @@ mkdir subdir && echo "c" > subdir/c.txt
 git init > /dev/null
 git add .
 expected=$(git write-tree)
-actual=$(../../your_program.sh write-tree | tail -n 1)
+actual=$(../../build.sh write-tree | tail -n 1)
 
 expected_entries=$(git ls-tree --name-only "$expected" | sort)
-actual_entries=$(../../your_program.sh ls-tree --name-only "$actual" 2>/dev/null | grep -v '^\[' | grep -v '^--' | sort)
+actual_entries=$(../../build.sh ls-tree --name-only "$actual" 2>/dev/null | grep -v '^\[' | grep -v '^--' | sort)
 
 if [ "$expected_entries" == "$actual_entries" ]; then
     echo -e "${GREEN}[PASS] ls-tree lists correct entries${NC}"

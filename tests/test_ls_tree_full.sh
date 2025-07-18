@@ -20,8 +20,8 @@ git add .
 expected_sha=$(git write-tree)
 expected=$(git ls-tree "$expected_sha" | sort)
 
-actual_sha=$(../../your_program.sh write-tree | tail -n 1)
-actual=$(../../your_program.sh ls-tree "$actual_sha" 2>/dev/null | grep -v '^\[' | grep -v '^--' | sort)
+actual_sha=$(../../build.sh write-tree | tail -n 1)
+actual=$(../../build.sh ls-tree "$actual_sha" 2>/dev/null | grep -v '^\[' | grep -v '^--' | sort)
 
 if [ "$expected" == "$actual" ]; then
     echo -e "${GREEN}[PASS] ls-tree (full) matches Git${NC}"

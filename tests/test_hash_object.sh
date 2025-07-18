@@ -12,7 +12,7 @@ rm -rf tmp_test && mkdir tmp_test && cd tmp_test
 
 echo "hello world" > file.txt
 
-actual=$(../../your_program.sh hash-object -w file.txt | tail -n 1)
+actual=$(../../build.sh hash-object -w file.txt | tail -n 1)
 expected=$(git hash-object -w file.txt)
 
 if [ "$expected" == "$actual" ]; then

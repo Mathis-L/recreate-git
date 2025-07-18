@@ -21,7 +21,7 @@ GIT_CLONE_DIR="official_git_clone"
 
 # --- Étape 1: Cloner avec votre programme ---
 echo -e "${CYAN}[1/3] Exécution de votre commande 'clone'...${NC}"
-../../your_program.sh clone "$REPO_URL" "$YOUR_CLONE_DIR"
+../../build.sh clone "$REPO_URL" "$YOUR_CLONE_DIR"
 
 # Vérifier si le répertoire a bien été créé par votre programme
 if [ ! -d "$YOUR_CLONE_DIR" ]; then
