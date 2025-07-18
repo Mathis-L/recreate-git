@@ -1,5 +1,7 @@
 # mygit - A C++ Implementation of Core Git Commands
 
+[![C++ CI for mygit](https://github.com/Mathis-L/recreate-git/actions/workflows/ci.yml/badge.svg)](https://github.com/Mathis-L/recreate-git/actions/workflows/ci.yml)
+
 **mygit** is a from-scratch implementation of several core Git commands in modern C++23. It was created as a portfolio project to gain a fundamental understanding of Git's internal object model, packfile protocol, and data structures. This project is inspired by the "Build Your Own X" initiative.
 
 ## Core Workflow Demo
