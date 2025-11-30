@@ -92,7 +92,7 @@ To understand how `mygit` works, it is essential to first understand Git's elega
 
 The most complex command implemented is `clone`, which involves a multi-stage conversation with a remote server using Git's Smart HTTP Protocol.
 
-For a detailed, step-by-step breakdown of how `mygit` handles reference discovery, packfile negotiation, and delta resolution, please see the **[Git Clone Deep Dive Document](./docs/CLONE_DEEP_DIVE.md)**.
+For a detailed, step-by-step breakdown of how `mygit` handles reference discovery, packfile negotiation, and delta resolution, please see the **[Git Clone Deep Dive Document](./docs/clone_deep_dive.md)**.
 
 
 ## Current Limitations
