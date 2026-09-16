@@ -85,78 +85,196 @@ The server's response to the POST request is a **multiplexed stream** that m
 The extractPackfileData function is responsible for reading this stream, filtering for only the \x01 lines, and concatenating their contents to reconstruct the complete, raw packfile.
 
 ## 🧩 Step 4: Parsing the Packfile - A Deep Dive
-A **packfile** is a single file containing multiple Git objects, highly compressed using zlib and delta compression.
+A **packfile** is a single binary file containing multiple Git objects concatenated together, highly compressed using zlib and delta compression.
 
-### 📦 Packfile Structure
+### 📦 1. Overall Packfile Structure
+The packfile layout consists of three primary sections:
+```text
+┌───────────────────────────┬───────────────────────────────────────────┬───────────────────────┐
+│ Header (12 bytes)         │ Object Entries (N sequential objects)     │ Checksum (20 bytes)   │
+├───────────────────────────┼───────────────────────────────────────────┼───────────────────────┤
+│ "PACK" (4B)               │ Object 1: [Header][Data/Delta]            │ SHA-1 checksum        │
+│ Version = 2 (4B)          │ Object 2: [Header][Data/Delta]            │ of all preceding data │
+│ Number of objects (4B)    │ ...                                       │                       │
+│                           │ Object N: [Header][Data/Delta]            │                       │
+└───────────────────────────┴───────────────────────────────────────────┴───────────────────────┘
+```
+
 1. **Header (12 bytes)**:
-    - PACK (4 bytes): The magic signature.
-    - Version (4 bytes): Version number (network byte order).
-    - Number of Objects (4 bytes): The total count of objects in this file.
-2. **Body (Object Entries)**: A sequence of compressed object entries.
-3. **Checksum (20 bytes)**: A SHA-1 hash of all preceding content for integrity verification.
-    
+   - `PACK` (4 bytes): Magic signature (`0x50 0x41 0x43 0x4B`).
+   - `Version` (4 bytes, Big-Endian): Supported packfile version (always 2).
+   - `Number of Objects` (4 bytes, Big-Endian): Total count of objects contained in the packfile (`num_objects`).
+2. **Body**: $N$ compressed object entries stored one after another.
+3. **Trailer (20 bytes)**: SHA-1 checksum verifying the integrity of the entire packfile stream.
 
-### The Packfile Object Entry Header
-The header for each object inside the packfile is **variable-length**. It cleverly encodes both the object's type and its uncompressed size in as few bytes as possible.
-```
-MSB
- |
- x   xxx   xxxx
-+-+-------+----+
-| |       |    |
-| |       |    +-- 4 bits for the first chunk of the size
-| |       +------- 3 bits for the object type (COMMIT, TREE, BLOB, etc.)
-| +--------------- 1 bit "continue" flag (1 = more size bytes follow)
-```
-### Delta Objects: The Core of Efficiency
-Instead of storing every version of a file as a full object, Git can store one **base object** and then a series of small **delta objects** that just contain the differences. A delta object's data is a stream of instructions. There are only two types:
-1. **copy**: "Copy a chunk of data from the base object."
-2. **add / insert**: "Insert this new data that was not in the base object."
-    
-#### Insert Instruction
-This is the simpler instruction. Its control byte is identified by its **Most Significant Bit (MSB) being 0**.
-```
-MSB
- |
- 0   xxxxxxx
-+-+-----------+
-| |           |
-| |           +-- 7 bits indicating the size (1-127 bytes) of the new data.
-| +-------------- Indicates an ADD / INSERT instruction.
-```
-The control byte itself tells the parser how many literal bytes to read from the delta stream and append to the target object.
+---
 
-#### Copy Instruction
-This is more complex. It tells the parser: "Copy N bytes from offset M in the base object." Its control byte starts with a 1 and acts as a **blueprint** for reading the offset and size.
+### 🏷️ 2. The Variable-Length Object Entry Header
+Each object inside the packfile starts with a variable-length header that encodes both the **object type** and its **uncompressed size**.
+
 ```
-MSB
- |
- 1   ccc   dddd
-+-+-------+----+
-| |       |    |
-| |       |    +-- Bits 0-3: Flags indicating which of 4 OFFSET bytes will follow.
-| +-------------- Bits 4-6: Flags indicating which of 3 SIZE bytes will follow.
-+----------------- Indicates a COPY instruction.
+Byte 1:
+ MSB (bit 7)   Bits 6, 5, 4      Bits 3, 2, 1, 0
+┌────────────┬──────────────────┬───────────────────────────────┐
+│ Continue ? │   Object Type    │ First 4 bits of size          │
+└────────────┴──────────────────┴───────────────────────────────┘
+  1 = more     (see table below)
+  0 = last
+
+Subsequent Bytes (if MSB was 1):
+ MSB (bit 7)   Bits 6 to 0
+┌────────────┬──────────────────────────────────────────────────┐
+│ Continue ? │ Next 7 bits of size                              │
+└────────────┴──────────────────────────────────────────────────┘
 ```
 
-🧪 **Example:** Copy **300 bytes** from **offset 70000**.
-1. **Analyze**: offset = 70000 requires **3 bytes**. size = 300 requires **2 bytes**.
-2. **Build Control Byte**:
-    - Offset Flags (dddd): Set bits 0, 1, 2 to 1 -> 0111.
-    - Size Flags (ccc): Set bits 4, 5 to 1 -> 011.
-    - Assemble 1 | 011 | 0111 -> 10110111 -> **0xB7**.
-3. **Instruction Stream**:
-    - 0xB7: The control byte. The parser knows to read 3 bytes for offset, 2 for size.
-    - 0x70 0x11 0x01: The 3 offset bytes for 70000.
-    - 0x2C 0x01: The 2 size bytes for 300.
-This entire instruction took only **6 bytes**.
+#### Object Types in Git Packfiles
+The 3 bits (bits 4 to 6 of byte 1) determine what kind of object is stored:
 
-### Resolving Deltas: A Multi-Pass Approach
-Because a delta object might appear in the packfile before its base, a simple linear scan won't work. The PackfileParser uses a multi-pass approach: it first caches all base objects and queues up the deltas. Then, it repeatedly loops over the queued deltas, applying any whose bases are now available, until all deltas are resolved into full objects.
+| Value | Binary | Type Name | Category | Description |
+| :---: | :---: | :--- | :--- | :--- |
+| **1** | `001` | `OBJ_COMMIT` | **Base Object** | Full commit metadata and tree pointer |
+| **2** | `010` | `OBJ_TREE` | **Base Object** | Full directory listing with permissions/hashes |
+| **3** | `011` | `OBJ_BLOB` | **Base Object** | Full file content |
+| **4** | `100` | `OBJ_TAG` | **Base Object** | Annotated tag |
+| **6** | `110` | `OBJ_OFS_DELTA` | **Delta Object** | Diff referencing base by relative packfile offset |
+| **7** | `111` | `OBJ_REF_DELTA` | **Delta Object** | Diff referencing base by 20-byte SHA-1 hash |
+
+---
+
+### 🔀 3. Base Objects vs Delta Objects (`REF_DELTA` vs `OFS_DELTA`)
+
+#### A. Base Objects (`COMMIT`, `TREE`, `BLOB`)
+For base objects, the entry is straightforward:
+```text
+┌─────────────────────────┬───────────────────────────────────────────┐
+│ Header (Type + Size)    │ zlib-compressed raw object data (deflate) │
+└─────────────────────────┴───────────────────────────────────────────┘
+```
+The zlib payload contains the full raw object content. Once inflated with zlib, its Git hash can be calculated immediately (`<type> <size>\0<data>`).
+
+#### B. Delta Objects (`OFS_DELTA` vs `REF_DELTA`)
+Delta objects do not store full files; they store diffs relative to a **base object**.
+Immediately following the type/size header bytes, the packfile provides a pointer to the base:
+
+```text
+Case A: REF_DELTA (Type 7)
+┌──────────────────────┬──────────────────────────┬─────────────────────────────┐
+│ En-tête (type+taille)│ SHA-1 direct (20 octets) │ Instructions zlib (deflate) │
+└──────────────────────┴──────────────────────────┴─────────────────────────────┘
+
+Case B: OFS_DELTA (Type 6)
+┌──────────────────────┬──────────────────────────┬─────────────────────────────┐
+│ En-tête (type+taille)│ Offset négatif (1-4 o.)  │ Instructions zlib (deflate) │
+└──────────────────────┴──────────────────────────┴─────────────────────────────┘
+```
+
+| Feature | `REF_DELTA` (Type 7) | `OFS_DELTA` (Type 6) |
+| :--- | :--- | :--- |
+| **Base Pointer** | **20-byte binary SHA-1** written directly in the pack. | **Variable-length integer** representing a backward byte offset. |
+| **Header Size** | Fixed **20 bytes** for base ID. | Compact **1 to 4 bytes** for base ID. |
+| **How Base is Found** | Look up directly in cache by SHA-1 (`delta_ref = hex(20 bytes)`). | Calculate `base_offset = current_offset - offset_delta`, then look up SHA-1 in `m_offset_to_sha_map[base_offset]`. |
+| **Scope** | Can reference objects outside the pack (*thin packs*). | Base **must** reside within the same packfile. |
+
+---
+
+### 📜 4. What's Inside the Compressed Delta Stream? (`apply_delta`)
+
+Once the zlib stream for a delta object is decompressed via `inflate()`, you obtain the raw **delta instruction stream**. It follows a specialized bytecode format:
+
+```text
+┌───────────────────────────┬────────────────────────────┬───────────────────────────────────────┐
+│ Base Size (variable int)  │ Target Size (variable int) │ Sequence of Instructions (Copy / Add) │
+└───────────────────────────┴────────────────────────────┴───────────────────────────────────────┘
+```
+
+1. **Header Sizes**:
+   - **Expected Base Size** (variable length): Git verifies that `base_size == base.size()`. If not, the delta is rejected.
+   - **Target Object Size** (variable length): The exact size of the final reconstructed object. Used to pre-allocate `result_data.reserve(target_size)`.
+
+2. **The Instruction Bytecode Stream**:
+   The parser reads instructions in a loop. Every instruction starts with a **control byte**:
+   - **MSB = 0 $\rightarrow$ `ADD` / `INSERT` instruction**:
+     ```text
+     Bit 7          Bits 6 to 0
+    ┌─────┬───────────────────────────────┐
+    │  0  │  Size N to insert (1 to 127)  │
+    └─────┴───────────────────────────────┘
+     ```
+     Bits 0–6 specify the number $N$ of literal bytes to read directly from the instruction stream and append to the result.
+   - **MSB = 1 $\rightarrow$ `COPY` instruction**:
+     ```text
+     Bit 7       Bits 6, 5, 4 (Size)          Bits 3, 2, 1, 0 (Offset)
+    ┌─────┬───────────────────────────────┬───────────────────────────────┐
+    │  1  │     Size byte mask            │      Offset byte mask         │
+    └─────┴───────────────────────────────┴───────────────────────────────┘
+     ```
+     Bits 0–3 indicate which of the 4 offset bytes follow; bits 4–6 indicate which of the 3 size bytes follow.
+     The parser reads the specified bytes to assemble `offset` and `size`, then slices `size` bytes from `base[offset .. offset + size]` into the result.
+
+---
+
+### ⚙️ 5. Step-by-Step Packfile Resolution Algorithm (`parseAndResolve`)
+
+Because delta objects can appear in the packfile before their base, or form **chains of deltas** ($A \rightarrow B \rightarrow C$), a single linear pass cannot resolve everything. `PackfileParser` implements a **multi-pass algorithm**:
+
+```
+                         PACKFILE STREAM
+                                │
+                                ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ PASS 1: Sequential Parse & Partitioning                     │
+ │                                                             │
+ │  For each object 0 .. num_objects:                          │
+ │  1. Decode variable-length header (type & uncompressed size)│
+ │  2. Read base reference (20B SHA for REF, offset for OFS)   │
+ │  3. Decompress zlib payload via inflate()                   │
+ │                                                             │
+ │  Is it a Base or Delta?                                     │
+ │    ├── BASE (commit, tree, blob):                           │
+ │    │     • Prepend "type size\0"                            │
+ │    │     • Calculate final SHA-1                            │
+ │    │     • Cache in m_object_data_cache[sha1]               │
+ │    │     • Record offset in m_offset_to_sha_map[offset]     │
+ │    │     • Add to final_objects                             │
+ │    │                                                        │
+ │    └── DELTA (OFS_DELTA, REF_DELTA):                        │
+ │          • Put into pending_deltas queue for Pass 2         │
+ └─────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ PASS 2: Multi-Pass Delta Resolution Loop                    │
+ │                                                             │
+ │  While pending_deltas is NOT empty:                         │
+ │    For each pending delta:                                  │
+ │      • Identify base SHA-1:                                 │
+ │          - REF_DELTA: already known from header             │
+ │          - OFS_DELTA: lookup m_offset_to_sha_map[base_offset]│
+ │      • Is base data available in m_object_data_cache?       │
+ │          ├── NO  ──► Keep in queue for next pass iteration  │
+ │          └── YES ──► 1. apply_delta(base_data, instructions)│
+ │                      2. Type = base.type                    │
+ │                      3. Calculate new SHA-1                 │
+ │                      4. Add to m_object_data_cache and      │
+ │                         m_offset_to_sha_map                 │
+ │                      5. Add to final_objects                │
+ └─────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ FINALIZATION (clone.cpp):                                   │
+ │  All objects are now resolved base objects!                 │
+ │  For each object: write to .git/objects/xx/yy (zlib-deflated)│
+ └─────────────────────────────────────────────────────────────┘
+```
+
+---
 
 ## 💾 Step 5, 6, & 7: Finalizing the Clone
-1. **Write Objects**: The fully resolved objects are decompressed, given their proper headers (blob <size>\0...), re-compressed with zlib, and written to the local .git/objects database.
-2. **Update Refs**: HEAD is set to ref: refs/heads/main, and .git/refs/heads/main is created with the target SHA-1.
-3. **Checkout**: The files from the HEAD commit's tree are written to the working directory.
-    
-And with that, git clone has successfully and efficiently mirrored the remote repository on your local machine.
+Once all objects in the packfile are reconstructed:
+1. **Write Loose Objects**: Each resolved object is given its canonical loose header (`<type> <size>\0<data>`), compressed with `compressZlib()`, and written to `.git/objects/<sha[0..2]>/<sha[2..40]>`.
+2. **Update Refs**: `HEAD` is initialized to `ref: refs/heads/main`, and `.git/refs/heads/main` is created containing the target commit SHA-1 discovered in Step 1.
+3. **Checkout Working Tree**: The root tree of the `HEAD` commit is parsed recursively (`checkoutTree`), writing all files and subdirectories to disk with their appropriate file modes.
+
+And with that, `git clone` has successfully downloaded, unpacked, resolved, and checked out the entire repository!
