@@ -195,6 +195,7 @@ Once the zlib stream for a delta object is decompressed via `inflate()`, you obt
 2. **The Instruction Bytecode Stream**:
    The parser reads instructions in a loop. Every instruction starts with a **control byte**:
    - **MSB = 0 $\rightarrow$ `ADD` / `INSERT` instruction**:
+- 
      ```text
      Bit 7          Bits 6 to 0
     ┌─────┬───────────────────────────────┐
@@ -203,6 +204,7 @@ Once the zlib stream for a delta object is decompressed via `inflate()`, you obt
      ```
      Bits 0–6 specify the number $N$ of literal bytes to read directly from the instruction stream and append to the result.
    - **MSB = 1 $\rightarrow$ `COPY` instruction**:
+-     
      ```text
      Bit 7       Bits 6, 5, 4 (Size)          Bits 3, 2, 1, 0 (Offset)
     ┌─────┬───────────────────────────────┬───────────────────────────────┐
